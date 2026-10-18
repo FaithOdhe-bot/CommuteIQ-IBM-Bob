@@ -1291,15 +1291,29 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     mode_label = mode_data.get("label", mode.title())
     mode_emoji = mode_data.get("emoji", "")
 
-    # Route
+    # Route — all three variables are declared before the try so that the
+    # except branch (and every line below) can reference them safely.
+    # If geocoding or OSRM fails we raise 503 rather than silently using a
+    # hardcoded 12 km distance that would produce a meaningless prediction.
+    origin_coords: dict = {}
+    dest_coords:   dict = {}
+    route_geometry      = None
     try:
         origin_coords = await geocode_place(req.origin, city)
         dest_coords   = await geocode_place(req.destination, city)
         route          = await get_route(origin_coords, dest_coords, mode)
         distance_km    = route["distance_km"]
         route_geometry = route.get("route_geometry")
-    except Exception:
-        distance_km = 12.0
+    except Exception as _routing_err:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Route unavailable: could not calculate a distance between "
+                f"'{req.origin}' and '{req.destination}' in {city.title()}. "
+                "The routing service may be temporarily unreachable. "
+                "Please try again in a moment."
+            ),
+        ) from _routing_err
 
     # Weather
     coords       = CITY_COORDS.get(city, {"lat": 6.5244, "lng": 3.3792})
