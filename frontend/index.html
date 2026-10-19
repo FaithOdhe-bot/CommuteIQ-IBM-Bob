@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CommuteIQ — AI Mobility Assistant</title>
+
+  <!-- Leaflet CSS — integrity hash verified against unpkg.com/leaflet@1.9.4/dist/leaflet.css -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="anonymous"
+  />
+
+  <style>
+    /* ── Reset & base ─────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:       #f4f6f9;
+      --surface:  #ffffff;
+      --border:   #e2e6ea;
+      --text:     #1a2332;
+      --muted:    #5c6b7d;
+      --accent:   #1a6eff;
+      --accent-h: #1255cc;
+      --green:    #16a34a;
+      --yellow:   #ca8a04;
+      --red:      #dc2626;
+      --orange:   #ea580c;
+      --radius:   10px;
+      --shadow:   0 2px 8px rgba(0,0,0,.08);
+    }
+
+    body {
+      font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+      font-size: 15px; line-height: 1.55;
+      background: var(--bg); color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── App shell ────────────────────────────────────────── */
+    .app-header {
+      background: var(--accent);
+      color: #fff;
+      padding: 16px 24px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .app-header .logo { font-size: 22px; font-weight: 800; letter-spacing: -.5px; }
+    .app-header .tagline { font-size: 12px; opacity: .85; }
+
+    .app-body {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 24px 16px 48px;
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 20px;
+      align-items: start;
+    }
+    @media (max-width: 780px) {
+      .app-body { grid-template-columns: 1fr; }
+    }
+
+    /* ── Card shell ───────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+    .card-title {
+      font-size: 13px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .6px;
+      color: var(--muted); margin-bottom: 16px;
+    }
+
+    /* ── Form ─────────────────────────────────────────────── */
+    .form-group { margin-bottom: 14px; }
+    label {
+      display: block; font-size: 13px; font-weight: 600;
+      color: var(--text); margin-bottom: 5px;
+    }
+    input[type="text"],
+    input[type="time"],
+    select {
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text);
+      background: var(--surface);
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus,
+    input[type="time"]:focus,
+    select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(26,110,255,.12);
+    }
+
+    /* Country toggle */
+    .country-toggle {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      margin-bottom: 10px;
+    }
+    .country-btn {
+      padding: 8px 0;
+      border: 1.5px solid var(--border);
+      border-radius: 7px;
+      background: var(--bg);
+      font-size: 14px; font-weight: 600;
+      cursor: pointer; text-align: center;
+      transition: all .15s;
+    }
+    .country-btn:hover { border-color: var(--accent); }
+    .country-btn.active {
+      background: var(--accent); color: #fff;
+      border-color: var(--accent);
+    }
+
+    /* Submit button */
+    .btn-primary {
+      width: 100%;
+      padding: 11px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      font-size: 15px; font-weight: 700;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      transition: background .15s;
+      margin-top: 4px;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-h); }
+    .btn-primary:disabled { opacity: .6; cursor: not-allowed; }
+
+    /* Spinner */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      display: none;
+    }
+    .loading .spinner { display: block; }
+    .loading .btn-text { display: none; }
+
+    /* Estimation notice */
+    .est-notice {
+      font-size: 11px; color: var(--muted);
+      margin-top: 10px; text-align: center;
+      line-height: 1.4;
+    }
+
+    /* ── Error / status banners ───────────────────────────── */
+    .alert {
+      border-radius: 8px; padding: 12px 14px;
+      font-size: 13px; line-height: 1.5;
+      margin-bottom: 16px; display: none;
+    }
+    .alert.show { display: block; }
+    .alert-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+    .alert-warn  { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+    .alert-info  { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e3a8a; }
+    .alert strong { font-weight: 700; }
+
+    /* ── Results panel ────────────────────────────────────── */
+    #results { display: none; }
+    #results.show { display: block; }
+
+    /* Stat row */
+    .stat-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    @media (max-width: 500px) { .stat-row { grid-template-columns: 1fr 1fr; } }
+    .stat-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 10px;
+      text-align: center;
+    }
+    .stat-box .val {
+      font-size: 24px; font-weight: 800;
+      color: var(--accent); line-height: 1.1;
+    }
+    .stat-box .lbl {
+      font-size: 11px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .5px;
+      margin-top: 2px;
+    }
+    .stat-box .sub {
+      font-size: 12px; color: var(--muted); margin-top: 1px;
+    }
+
+    /* Chip row */
+    .chip-row {
+      display: flex; flex-wrap: wrap; gap: 7px;
+      margin-bottom: 14px;
+    }
+    .chip {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px; font-weight: 600;
+      border: 1px solid;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .chip-green  { background: #f0fdf4; border-color: #86efac; color: #15803d; }
+    .chip-yellow { background: #fefce8; border-color: #fde047; color: #a16207; }
+    .chip-red    { background: #fff1f2; border-color: #fda4af; color: #be123c; }
+    .chip-blue   { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+    .chip-gray   { background: #f8fafc; border-color: #cbd5e1; color: #475569; }
+    .chip-orange { background: #fff7ed; border-color: #fed7aa; color: #c2410c; }
+
+    /* Safety bar */
+    .safety-row { margin-bottom: 14px; }
+    .safety-header {
+      display: flex; justify-content: space-between;
+      align-items: center; margin-bottom: 6px;
+    }
+    .safety-label { font-size: 13px; font-weight: 600; }
+    .safety-score { font-size: 15px; font-weight: 800; color: var(--accent); }
+    .safety-bar-track {
+      height: 8px; background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 99px; overflow: hidden;
+    }
+    .safety-bar-fill {
+      height: 100%; border-radius: 99px;
+      transition: width .5s ease;
+    }
+    .safety-note {
+      font-size: 11px; color: var(--muted); margin-top: 4px;
+    }
+
+    /* Quality badge */
+    .quality-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 13px; font-weight: 700;
+      margin-bottom: 14px;
+    }
+    .quality-good     { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
+    .quality-moderate { background: #fefce8; color: #a16207; border: 1px solid #fde047; }
+    .quality-poor     { background: #fff1f2; color: #be123c; border: 1px solid #fda4af; }
+
+    /* Explanation block */
+    .explanation {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 13px; line-height: 1.6;
+      color: var(--text);
+      margin-bottom: 14px;
+    }
+    .explanation .section-label {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px;
+      color: var(--muted); margin-bottom: 5px;
+    }
+
+    /* Advice / callout banners */
+    .advice-banner {
+      border-radius: 8px; padding: 11px 14px;
+      font-size: 13px; line-height: 1.5;
+      margin-bottom: 10px;
+      border: 1px solid;
+    }
+    .advice-banner .icon { margin-right: 6px; }
+    .banner-blue   { background: #eff6ff; border-color: #bfdbfe; color: #1e3a8a; }
+    .banner-yellow { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+    .banner-red    { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+    .banner-green  { background: #f0fdf4; border-color: #bbf7d0; color: #14532d; }
+
+    /* Road quality secondary stat */
+    .secondary-stats {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      margin-bottom: 14px;
+    }
+    .sec-stat {
+      font-size: 12px; color: var(--muted);
+      display: flex; align-items: center; gap: 4px;
+    }
+    .sec-stat strong { color: var(--text); }
+
+    /* Confidence + star footer */
+    .result-footer {
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+      font-size: 12px; color: var(--muted);
+      display: flex; flex-wrap: wrap; gap: 8px;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    /* Map wrapper — carries border-radius + border so #map itself has no
+       overflow clipping that would blank Leaflet's tile panes. */
+    .map-wrap {
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      overflow: hidden;   /* clips only the wrapper, not the Leaflet canvas */
+      margin-bottom: 14px;
+      display: none;
+    }
+    .map-wrap.show { display: block; }
+
+    /* #map must have explicit height and NO overflow:hidden so Leaflet's
+       absolutely-positioned tile layers are never clipped. */
+    #map {
+      height: 280px;
+      width: 100%;
+      display: block;
+    }
+
+    /* Map unavailable notice */
+    .map-unavailable {
+      height: 280px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--bg); border-radius: 8px;
+      border: 1px solid var(--border);
+      color: var(--muted); font-size: 13px;
+      margin-bottom: 14px;
+    }
+
+    /* Mode confirmation line */
+    .mode-line {
+      font-size: 13px; color: var(--muted);
+      margin-bottom: 14px;
+    }
+    .mode-line strong { color: var(--text); }
+
+    /* Divider */
+    .divider {
+      border: none; border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────── -->
+<header class="app-header" role="banner">
+  <div>
+    <div class="logo">🗺️ CommuteIQ</div>
+    <div class="tagline">AI-powered mobility intelligence for African cities</div>
+  </div>
+</header>
+
+<main class="app-body" role="main">
+
+  <!-- ── Form panel ──────────────────────────────────────── -->
+  <section class="card" aria-label="Trip planner form">
+    <div class="card-title">Plan Your Commute</div>
+
+    <!-- Error / status banner -->
+    <div id="error-banner" class="alert alert-error" role="alert" aria-live="polite"></div>
+
+    <form id="predict-form" novalidate>
+
+      <!-- Country -->
+      <div class="form-group">
+        <label id="country-label">Country</label>
+        <div class="country-toggle" role="group" aria-labelledby="country-label">
+          <button type="button" class="country-btn active" data-country="kenya" aria-pressed="true">
+            🇰🇪 Kenya
+          </button>
+          <button type="button" class="country-btn" data-country="nigeria" aria-pressed="false">
+            🇳🇬 Nigeria
+          </button>
+        </div>
+      </div>
+
+      <!-- City -->
+      <div class="form-group">
+        <label for="city-select" id="city-select-label">City / County</label>
+        <select id="city-select" aria-label="Select city"></select>
+        <input type="hidden" id="city-input" value="nairobi" />
+      </div>
+
+      <!-- Origin -->
+      <div class="form-group">
+        <label for="origin">Origin</label>
+        <input
+          type="text"
+          id="origin"
+          placeholder="e.g. Westlands, CBD, Lekki"
+          autocomplete="off"
+          required
+          aria-required="true"
+        />
+      </div>
+
+      <!-- Destination -->
+      <div class="form-group">
+        <label for="destination">Destination</label>
+        <input
+          type="text"
+          id="destination"
+          placeholder="e.g. Karen, Victoria Island"
+          autocomplete="off"
+          required
+          aria-required="true"
+        />
+      </div>
+
+      <!-- Transport mode -->
+      <div class="form-group">
+        <label for="mode-select">Transport Mode</label>
+        <select id="mode-select" aria-label="Select transport mode">
+          <option value="">Loading modes…</option>
+        </select>
+      </div>
+
+      <!-- Departure time (optional) -->
+      <div class="form-group">
+        <label for="depart-time">
+          Departure Time
+          <span style="font-weight:400;color:var(--muted)">(optional — defaults to now)</span>
+        </label>
+        <input type="time" id="depart-time" aria-label="Departure time" />
+      </div>
+
+      <!-- Submit -->
+      <button type="submit" class="btn-primary" id="submit-btn" aria-label="Calculate commute">
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="btn-text">Calculate Route</span>
+      </button>
+
+      <p class="est-notice">
+        ⚠️ Travel times and safety scores are <strong>model estimates</strong> based on
+        historical African road data. They are not verified real-time conditions.
+      </p>
+    </form>
+  </section>
+
+  <!-- ── Results panel ───────────────────────────────────── -->
+  <section id="results" class="card" aria-label="Route prediction results" aria-live="polite">
+    <div class="card-title">Route Prediction</div>
+
+    <!-- Mode confirmation -->
+    <p class="mode-line" id="mode-confirm"></p>
+
+    <!-- Stat row: time · distance · ETA -->
+    <div class="stat-row" role="list">
+      <div class="stat-box" role="listitem">
+        <div class="val" id="stat-time">—</div>
+        <div class="lbl">Est. Travel Time</div>
+        <div class="sub">minutes</div>
+      </div>
+      <div class="stat-box" role="listitem">
+        <div class="val" id="stat-dist">—</div>
+        <div class="lbl">Distance</div>
+        <div class="sub">km</div>
+      </div>
+      <div class="stat-box" role="listitem">
+        <div class="val" id="stat-eta">—</div>
+        <div class="lbl">Est. Arrival</div>
+        <div class="sub" id="stat-eta-sub"></div>
+      </div>
+    </div>
+
+    <!-- Condition chips -->
+    <div class="chip-row" id="chip-row" role="list" aria-label="Conditions"></div>
+
+    <!-- Safety score -->
+    <div class="safety-row">
+      <div class="safety-header">
+        <span class="safety-label">
+          Safety Score
+          <span style="font-weight:400;color:var(--muted);font-size:11px"> — mode &amp; city risk baseline</span>
+        </span>
+        <span class="safety-score" id="safety-val">—</span>
+      </div>
+      <div class="safety-bar-track" role="progressbar" aria-label="Safety score"
+           aria-valuemin="0" aria-valuemax="100" id="safety-bar-track">
+        <div class="safety-bar-fill" id="safety-bar" style="width:0%"></div>
+      </div>
+      <div class="safety-note">
+        Based on national crash statistics and transport mode risk factors.
+        Not a per-corridor measurement. Independent of commute quality below.
+      </div>
+    </div>
+
+    <!-- Commute quality -->
+    <div class="card-title" style="font-size:11px;margin-top:4px;margin-bottom:4px">
+      Commute Quality — traffic &amp; weather conditions
+    </div>
+    <div id="quality-badge"></div>
+
+    <hr class="divider" />
+
+    <!-- AI explanation -->
+    <div class="explanation" id="explanation-block">
+      <div class="section-label">AI Explanation</div>
+      <div id="explanation-text"></div>
+    </div>
+
+    <!-- Departure advice -->
+    <div id="departure-advice-block"></div>
+
+    <!-- Alt suggestion (conditional) -->
+    <div id="alt-suggestion-block"></div>
+
+    <!-- Flood risk (conditional) -->
+    <div id="flood-risk-block"></div>
+
+    <!-- Staggered departure tip (conditional) -->
+    <div id="staggered-block"></div>
+
+    <!-- Secondary stats: road quality, community reports -->
+    <div class="secondary-stats" id="secondary-stats"></div>
+
+    <!-- Route map — wrapper carries border-radius; #map itself has no overflow:hidden -->
+    <div class="map-wrap" id="map-wrap">
+      <div id="map" aria-label="Route map"></div>
+    </div>
+
+    <!-- Footer: confidence + star rating -->
+    <div class="result-footer" id="result-footer"></div>
+  </section>
+
+</main>
+
+<!-- Leaflet JS — integrity hash verified against unpkg.com/leaflet@1.9.4/dist/leaflet.js -->
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin="anonymous"
+></script>
+
+<script>
+"use strict";
+
+// ── Configuration ──────────────────────────────────────────────
+// Change this to your deployed backend URL for production.
+const API_BASE = "http://localhost:8000";
+
+// ── Supported cities — mirrors backend CITY_COORDS exactly ─────
+// Source: backend/app/main.py CITY_COORDS dict (13 cities total).
+const CITIES = {
+  kenya: [
+    { key: "nairobi",  label: "Nairobi" },
+    { key: "mombasa",  label: "Mombasa" },
+    { key: "kisumu",   label: "Kisumu"  },
+    { key: "nakuru",   label: "Nakuru"  },
+    { key: "eldoret",  label: "Eldoret" },
+  ],
+  nigeria: [
+    { key: "lagos",          label: "Lagos"         },
+    { key: "abuja",          label: "Abuja"         },
+    { key: "kano",           label: "Kano"          },
+    { key: "ibadan",         label: "Ibadan"        },
+    { key: "port harcourt",  label: "Port Harcourt" },
+    { key: "enugu",          label: "Enugu"         },
+    { key: "asaba",          label: "Asaba"         },
+    { key: "benin city",     label: "Benin City"    },
+  ],
+};
+
+// ── Hardcoded mode fallback (used if GET /modes fails) ─────────
+const FALLBACK_MODES = {
+  nairobi: [
+    { key: "driving",   label: "🚗 Private Car",  emoji: "🚗" },
+    { key: "matatu",    label: "🚐 Matatu",        emoji: "🚐" },
+    { key: "boda_boda", label: "🏍️ Boda-Boda",    emoji: "🏍️" },
+    { key: "taxi",      label: "🚕 Taxi",           emoji: "🚕" },
+    { key: "walking",   label: "🚶 Walking",        emoji: "🚶" },
+  ],
+  lagos: [
+    { key: "driving", label: "🚗 Private Car", emoji: "🚗" },
+    { key: "danfo",   label: "🚌 Danfo Bus",   emoji: "🚌" },
+    { key: "brt",     label: "🚍 BRT",         emoji: "🚍" },
+    { key: "okada",   label: "🏍️ Okada",       emoji: "🏍️" },
+    { key: "keke",    label: "🛺 Keke Napep",  emoji: "🛺" },
+    { key: "walking", label: "🚶 Walking",      emoji: "🚶" },
+  ],
+  // For all other cities: GET /modes will return the live list;
+  // fallback here uses a minimal set valid in all Nigerian/Kenyan cities.
+  _nigeria_default: [
+    { key: "driving", label: "🚗 Private Car", emoji: "🚗" },
+    { key: "walking", label: "🚶 Walking",      emoji: "🚶" },
+  ],
+  _kenya_default: [
+    { key: "driving", label: "🚗 Private Car", emoji: "🚗" },
+    { key: "walking", label: "🚶 Walking",      emoji: "🚶" },
+  ],
+};
+
+// ── State ──────────────────────────────────────────────────────
+let selectedCountry = "kenya";
+let selectedCity    = "nairobi";
+let leafletMap      = null;
+let routeLayer      = null;
+let _mapFrameId     = null;   // tracks pending requestAnimationFrame so we can cancel it
+
+// ── DOM refs ───────────────────────────────────────────────────
+const form          = document.getElementById("predict-form");
+const submitBtn     = document.getElementById("submit-btn");
+const cityInput     = document.getElementById("city-input");
+const citySelect    = document.getElementById("city-select");
+const originInput   = document.getElementById("origin");
+const destInput     = document.getElementById("destination");
+const modeSelect    = document.getElementById("mode-select");
+const timeInput     = document.getElementById("depart-time");
+const errorBanner   = document.getElementById("error-banner");
+const resultsPanel  = document.getElementById("results");
+
+// ── Utility helpers ────────────────────────────────────────────
+
+function showError(msg) {
+  errorBanner.innerHTML = msg;
+  errorBanner.classList.add("show");
+  errorBanner.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function clearError() {
+  errorBanner.innerHTML = "";
+  errorBanner.classList.remove("show");
+}
+
+function setLoading(on) {
+  submitBtn.disabled = on;
+  submitBtn.classList.toggle("loading", on);
+  submitBtn.setAttribute("aria-busy", String(on));
+}
+
+function el(id) { return document.getElementById(id); }
+
+function safeText(text, fallback) {
+  return (text !== null && text !== undefined && text !== "") ? text : fallback;
+}
+
+// ── Country selector ──────────────────────────────────────────
+
+function populateCitySelect(country) {
+  // Update label to reflect the administrative unit used in each country
+  const cityLabel = document.getElementById("city-select-label");
+  if (cityLabel) {
+    cityLabel.textContent = country === "kenya" ? "City / County" : "City / State";
+  }
+
+  const cities = CITIES[country] || [];
+  citySelect.innerHTML = "";
+  cities.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.key;
+    opt.textContent = c.label;
+    citySelect.appendChild(opt);
+  });
+  // Pick first city in list as default
+  const first = cities[0];
+  if (first) {
+    citySelect.value = first.key;
+    selectedCity = first.key;
+    cityInput.value = first.key;
+  }
+}
+
+document.querySelectorAll(".country-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    selectedCountry = btn.dataset.country;
+    document.querySelectorAll(".country-btn").forEach(b => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-pressed", String(b === btn));
+    });
+    populateCitySelect(selectedCountry);
+    loadModes(selectedCity);
+    clearResults();
+  });
+});
+
+citySelect.addEventListener("change", () => {
+  selectedCity = citySelect.value;
+  cityInput.value = selectedCity;
+  loadModes(selectedCity);
+  clearResults();
+});
+
+function clearResults() {
+  resultsPanel.classList.remove("show");
+  clearError();
+  // Destroy any existing map so stale geometry is not shown for the new city
+  if (leafletMap) {
+    if (_mapFrameId !== null) { cancelAnimationFrame(_mapFrameId); _mapFrameId = null; }
+    leafletMap.remove();
+    leafletMap = null;
+    routeLayer = null;
+  }
+  const wrap = el("map-wrap");
+  if (wrap) wrap.classList.remove("show");
+}
+
+// ── Load transport modes from API ─────────────────────────────
+
+async function loadModes(city) {
+  modeSelect.innerHTML = '<option value="">Loading…</option>';
+  modeSelect.disabled = true;
+
+  try {
+    const res  = await fetch(`${API_BASE}/modes?city=${encodeURIComponent(city)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // data.modes is an array of {key, label, emoji, description}
+    const modes = (data.modes || []).filter(m => m.key && typeof m.key === "string");
+    if (modes.length === 0) throw new Error("Empty modes list");
+
+    populateModes(modes);
+  } catch (err) {
+    // Silent fallback — do not block the user, just use the hardcoded list.
+    // Try exact city key, then country default, then nairobi default.
+    const countryKey = `_${selectedCountry}_default`;
+    const fallback   = FALLBACK_MODES[city] || FALLBACK_MODES[countryKey] || FALLBACK_MODES.nairobi;
+    console.warn("GET /modes failed, using fallback:", err.message);
+    populateModes(fallback);
+  }
+}
+
+function populateModes(modes) {
+  modeSelect.innerHTML = "";
+  modes.forEach(m => {
+    const opt  = document.createElement("option");
+    opt.value  = m.key;
+    opt.textContent = m.emoji ? `${m.emoji} ${m.label}` : m.label;
+    modeSelect.appendChild(opt);
+  });
+  modeSelect.disabled = false;
+}
+
+// ── Form submit ────────────────────────────────────────────────
+
+form.addEventListener("submit", async e => {
+  e.preventDefault();
+  clearError();
+
+  const origin = originInput.value.trim();
+  const dest   = destInput.value.trim();
+  const mode   = modeSelect.value;
+  const city   = cityInput.value;
+  const time   = timeInput.value || null;
+
+  // Client-side validation
+  if (!origin) {
+    showError("<strong>Origin required.</strong> Please enter a starting location.");
+    originInput.focus();
+    return;
+  }
+  if (!dest) {
+    showError("<strong>Destination required.</strong> Please enter an end location.");
+    destInput.focus();
+    return;
+  }
+  if (!mode) {
+    showError("<strong>Transport mode required.</strong> Please select a mode.");
+    modeSelect.focus();
+    return;
+  }
+
+  setLoading(true);
+  resultsPanel.classList.remove("show");
+
+  try {
+    const res = await fetch(`${API_BASE}/v2/predict`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ origin, destination: dest, mode, city, time }),
+    });
+
+    const body = await res.json().catch(() => null);
+
+    if (res.status === 503) {
+      showError(
+        `<strong>Routing service temporarily unavailable.</strong> ` +
+        `The route between "${origin}" and "${dest}" could not be calculated right now. ` +
+        `Please try again in a moment.`
+      );
+      return;
+    }
+
+    if (res.status === 400) {
+      const detail = (body && body.detail) ? body.detail : "Invalid request.";
+      showError(`<strong>Request error (400):</strong> ${detail}`);
+      return;
+    }
+
+    if (!res.ok) {
+      showError(
+        `<strong>Unexpected error (HTTP ${res.status}).</strong> ` +
+        `Please check your inputs and try again.`
+      );
+      return;
+    }
+
+    if (!body) {
+      showError("<strong>Empty response from server.</strong> Please try again.");
+      return;
+    }
+
+    renderResults(body, origin, dest, city, mode);
+
+  } catch (err) {
+    // Network failure — fetch() itself threw
+    showError(
+      `<strong>Could not reach the CommuteIQ server.</strong> ` +
+      `Check your internet connection and try again. ` +
+      `<em style="font-size:12px">(${err.message})</em>`
+    );
+  } finally {
+    setLoading(false);
+  }
+});
+
+// ── Render results ─────────────────────────────────────────────
+
+function renderResults(d, origin, dest, city, modeKey) {
+
+  // ── Mode confirmation ──
+  const mLabel = d.mode_label || modeKey;
+  const mEmoji = d.mode_emoji || "";
+  el("mode-confirm").innerHTML =
+    `${mEmoji} <strong>${mLabel}</strong> · ${origin} → ${dest}`;
+
+  // ── Stat row ──
+  el("stat-time").textContent = Math.round(d.travel_time_min);
+  el("stat-dist").textContent = d.distance_km != null
+    ? d.distance_km.toFixed(1)
+    : "—";
+  if (d.arrival_time) {
+    el("stat-eta").textContent    = d.arrival_time;
+    el("stat-eta-sub").textContent = "estimated";
+  } else {
+    el("stat-eta").textContent    = "—";
+    el("stat-eta-sub").textContent = "";
+  }
+
+  // ── Condition chips ──
+  const chipRow = el("chip-row");
+  chipRow.innerHTML = "";
+
+  chipRow.appendChild(makeChip(congestionChipClass(d.congestion),
+    `🚦 Traffic: ${d.congestion}`));
+  chipRow.appendChild(makeChip(weatherChipClass(d.weather),
+    `${weatherEmoji(d.weather)} ${d.weather}`));
+
+  if (d.community_reports > 0) {
+    // Incidents may include news-scanned items (unverified) alongside
+    // user-submitted reports — label as "unverified" to avoid implying validation.
+    chipRow.appendChild(makeChip("chip-orange",
+      `⚠️ ${d.community_reports} incident report${d.community_reports > 1 ? "s" : ""} (unverified)`));
+  }
+
+  // ── Safety bar ──
+  const score  = d.safety_score;
+  const barEl  = el("safety-bar");
+  const trackEl = el("safety-bar-track");
+  barEl.style.width      = `${score}%`;
+  barEl.style.background = safetyColor(score);
+  trackEl.setAttribute("aria-valuenow", String(Math.round(score)));
+  el("safety-val").textContent = `${score.toFixed(0)} / 100`;
+
+  // ── Commute quality badge ──
+  const qClass = qualityClass(d.commute_quality);
+  el("quality-badge").innerHTML =
+    `<div class="quality-badge ${qClass}" role="status" aria-label="Commute quality: ${d.commute_quality}">
+       ${d.quality_emoji || ""} ${d.commute_quality}
+     </div>`;
+
+  // ── AI explanation ──
+  el("explanation-text").textContent = d.ai_explanation;
+
+  // ── Departure advice ──
+  el("departure-advice-block").innerHTML = d.departure_advice
+    ? `<div class="advice-banner banner-blue">
+         <span class="icon">🕐</span>${escHtml(d.departure_advice)}
+       </div>`
+    : "";
+
+  // ── Alt suggestion (conditional) ──
+  el("alt-suggestion-block").innerHTML = d.alt_suggestion
+    ? `<div class="advice-banner banner-yellow">
+         <span class="icon">💡</span>${escHtml(d.alt_suggestion)}
+       </div>`
+    : "";
+
+  // ── Flood risk (conditional — only shown when risk is non-null from API) ──
+  el("flood-risk-block").innerHTML = "";
+  if (d.flood_risk && d.flood_risk.risk && d.flood_risk.risk !== "Low") {
+    const zones = (d.flood_risk.zones || []).map(z => z.name || z).join(", ");
+    el("flood-risk-block").innerHTML =
+      `<div class="advice-banner banner-red">
+         <span class="icon">🌊</span>
+         <strong>Flood risk: ${escHtml(d.flood_risk.risk)}</strong>
+         ${zones ? `— near ${escHtml(zones)}` : ""}
+       </div>`;
+  }
+
+  // ── Staggered departure (conditional) ──
+  el("staggered-block").innerHTML = "";
+  if (d.staggered_departure && d.staggered_departure.display) {
+    el("staggered-block").innerHTML =
+      `<div class="advice-banner banner-green">
+         ${escHtml(d.staggered_departure.display)}
+       </div>`;
+  }
+
+  // ── Secondary stats ──
+  const secStats = el("secondary-stats");
+  secStats.innerHTML = "";
+  if (d.road_quality_score != null) {
+    // Road quality comes from the road_quality.pkl model — label as estimated.
+    secStats.appendChild(makeSecStat("🛣️", "Road quality (est.)", `${d.road_quality_score}/100`));
+  }
+  if (d.quality_score != null) {
+    secStats.appendChild(makeSecStat("📊", "Quality score", `${d.quality_score}/100`));
+  }
+
+  // ── Footer: confidence + star rating ──
+  // The confidence score is a heuristic point total, not a calibrated
+  // statistical probability — append "(heuristic estimate)" to prevent
+  // the percentage from being read as predictive accuracy.
+  const footer = el("result-footer");
+  footer.innerHTML = "";
+  if (d.confidence && d.confidence.summary) {
+    const span = document.createElement("span");
+    span.textContent = d.confidence.summary + " (heuristic estimate)";
+    footer.appendChild(span);
+  }
+  if (d.route_confidence && d.route_confidence.display) {
+    const span = document.createElement("span");
+    span.title = d.route_confidence.label || "";
+    span.textContent = d.route_confidence.display;
+    footer.appendChild(span);
+  }
+
+  // ── Show panel BEFORE renderMap so the container has real dimensions ──
+  // Leaflet reads clientWidth/clientHeight at init time; if the parent
+  // is still display:none the map gets zero size and tiles render blank.
+  resultsPanel.classList.add("show");
+  resultsPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  // ── Map (called after panel is visible) ──
+  renderMap(d.route_geometry, city, d.distance_km, origin, dest);
+}
+
+// ── Leaflet map ────────────────────────────────────────────────
+
+function _hideMap() {
+  const wrap = el("map-wrap");
+  if (wrap) wrap.classList.remove("show");
+  if (leafletMap) { leafletMap.remove(); leafletMap = null; routeLayer = null; }
+}
+
+function _showMapUnavailable(reason) {
+  // Replace the map wrapper contents with a clear "unavailable" notice
+  // rather than leaving a blank white rectangle.
+  _hideMap();
+  const existing = el("map-unavailable-notice");
+  if (existing) existing.remove();
+  const notice = document.createElement("div");
+  notice.id        = "map-unavailable-notice";
+  notice.className = "map-unavailable";
+  notice.textContent = `🗺️ Map unavailable — ${reason}`;
+  // Insert the notice after the secondary-stats block
+  const secStats = el("secondary-stats");
+  if (secStats && secStats.parentNode) {
+    secStats.parentNode.insertBefore(notice, secStats.nextSibling);
+  }
+}
+
+function renderMap(geometry, city, distanceKm, origin, dest) {
+  // Remove any previous "unavailable" notice from a prior failed attempt
+  const prevNotice = el("map-unavailable-notice");
+  if (prevNotice) prevNotice.remove();
+
+  // Guard: Leaflet may have failed to load (SRI mismatch, network error, etc.).
+  // If L is not defined, show a clear notice rather than throwing ReferenceError.
+  if (typeof L === "undefined") {
+    _showMapUnavailable("Leaflet map library could not be loaded — check your connection or browser settings");
+    return;
+  }
+
+  // Cancel any pending rAF from a previous call (handles rapid re-submits)
+  if (_mapFrameId !== null) {
+    cancelAnimationFrame(_mapFrameId);
+    _mapFrameId = null;
+  }
+
+  if (!geometry || geometry.length < 2) {
+    // geometry is null or too short — route was calculated but no shape returned
+    _hideMap();
+    return;
+  }
+
+  // Tear down any previous instance before making the wrapper visible
+  if (leafletMap) {
+    leafletMap.remove();
+    leafletMap = null;
+    routeLayer = null;
+  }
+
+  const wrap = el("map-wrap");
+  if (wrap) wrap.classList.add("show");
+
+  // Results panel is already visible at this point (show() was called above
+  // before renderMap). Defer one rAF so the browser commits the layout change
+  // and the map div reports a non-zero clientWidth/clientHeight.
+  _mapFrameId = requestAnimationFrame(() => {
+    _mapFrameId = null;
+
+    // Guard: if the container still has no size, display the unavailable notice
+    // instead of creating a zero-size Leaflet instance.
+    const mapDiv = el("map");
+    if (!mapDiv || mapDiv.clientWidth === 0 || mapDiv.clientHeight === 0) {
+      _showMapUnavailable("route shape could not be displayed");
+      return;
+    }
+
+    const centre = geometry[Math.floor(geometry.length / 2)];
+    leafletMap = L.map("map").setView(centre, 12);
+
+    // Track tile load errors — if ALL tiles fail, show a clear message.
+    let tileErrors = 0;
+    let tileLoads  = 0;
+    const tileLayer = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 18,
+      }
+    );
+    tileLayer.on("tileload",  () => { tileLoads++; });
+    tileLayer.on("tileerror", () => {
+      tileErrors++;
+      // After 3 consecutive tile errors with no success, show the notice.
+      if (tileErrors >= 3 && tileLoads === 0) {
+        _showMapUnavailable("map tiles could not be loaded — check your connection");
+      }
+    });
+    tileLayer.addTo(leafletMap);
+
+    routeLayer = L.polyline(geometry, { color: "#1a6eff", weight: 4, opacity: .85 })
+      .addTo(leafletMap);
+
+    // Origin / destination markers
+    L.marker(geometry[0])
+      .bindPopup(`<strong>Origin:</strong> ${escHtml(origin)}`)
+      .addTo(leafletMap);
+    L.marker(geometry[geometry.length - 1])
+      .bindPopup(`<strong>Destination:</strong> ${escHtml(dest)}`)
+      .addTo(leafletMap);
+
+    leafletMap.fitBounds(routeLayer.getBounds(), { padding: [20, 20] });
+
+    // invalidateSize forces Leaflet to re-measure after fitBounds.
+    leafletMap.invalidateSize();
+  });
+}
+
+// ── Helper: chips ──────────────────────────────────────────────
+
+function makeChip(cls, text) {
+  const span = document.createElement("span");
+  span.className = `chip ${cls}`;
+  span.setAttribute("role", "listitem");
+  span.textContent = text;
+  return span;
+}
+
+function makeSecStat(icon, label, value) {
+  const div = document.createElement("div");
+  div.className  = "sec-stat";
+  div.innerHTML  = `${icon} ${escHtml(label)}: <strong>${escHtml(value)}</strong>`;
+  return div;
+}
+
+// ── Helper: colour / class mappings ───────────────────────────
+
+function congestionChipClass(c) {
+  if (c === "High")   return "chip-red";
+  if (c === "Medium") return "chip-yellow";
+  return "chip-green";
+}
+
+function weatherChipClass(w) {
+  if (w === "Rainy" || w === "Foggy") return "chip-blue";
+  if (w === "Cloudy") return "chip-gray";
+  return "chip-green";
+}
+
+function weatherEmoji(w) {
+  const map = { Clear: "☀️", Cloudy: "🌥️", Rainy: "🌧️", Foggy: "🌫️" };
+  return map[w] || "🌤️";
+}
+
+function safetyColor(score) {
+  if (score >= 70) return "#16a34a";
+  if (score >= 45) return "#ca8a04";
+  return "#dc2626";
+}
+
+function qualityClass(quality) {
+  const q = (quality || "").toLowerCase();
+  if (q === "good")     return "quality-good";
+  if (q === "moderate") return "quality-moderate";
+  return "quality-poor";
+}
+
+// ── Helper: safe HTML escaping ─────────────────────────────────
+function escHtml(str) {
+  if (typeof str !== "string") return "";
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ── Bootstrap: populate city dropdown and load modes ──────────
+populateCitySelect(selectedCountry);   // fills city <select> for Kenya
+loadModes(selectedCity);               // loads modes for Nairobi
+</script>
+</body>
+</html>

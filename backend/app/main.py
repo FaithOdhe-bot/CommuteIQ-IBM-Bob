@@ -505,9 +505,41 @@ def get_safety_score(city: str, mode: str) -> float:
 
 # ── Alternative mode suggestion ───────────────────────────────
 
+def _dest_is_cbd(destination: str, city: str) -> bool:
+    """Return True when the destination is likely the city centre rather than
+    a known outer suburb.
+
+    Strategy (avoids a single brittle keyword list):
+      1. Explicit CBD tokens — catch "CBD", "city centre", "town" etc.
+      2. If the destination matches a *known outer suburb* in the suburb
+         coord tables, it is NOT CBD — return False.
+      3. If neither rule fires, assume CBD / unknown central area — return True.
+         (Conservative: better to show the matatu terminus notice than to
+         silently omit it when the destination is genuinely central.)
+    """
+    dest_lower = destination.lower().strip()
+    dest_base  = dest_lower.split(",")[0].strip()
+
+    # 1. Explicit CBD keywords (small, high-confidence set)
+    CBD_TOKENS = {"cbd", "city centre", "city center", "downtown", "town centre",
+                  "nairobi cbd", "town", "kenyatta avenue", "moi avenue",
+                  "tom mboya", "haile selassie", "kenyatta", "uhuru park",
+                  "city hall", "central"}
+    if any(tok in dest_lower for tok in CBD_TOKENS):
+        return True
+
+    # 2. Known outer suburb → NOT CBD
+    if city.lower() == "nairobi" and dest_base in NAIROBI_SUBURB_COORDS:
+        return False
+
+    # 3. Unknown destination — assume it could be central
+    return True
+
+
 def suggest_alternative_mode(
     mode: str, city: str, congestion: str,
-    weather: str, distance_km: float
+    weather: str, distance_km: float,
+    destination: str = "",
 ) -> Optional[str]:
     """Suggest a better mode given current conditions and legal restrictions."""
     if not transport_modes:
@@ -539,8 +571,11 @@ def suggest_alternative_mode(
                 return msg.format(dist=distance_km) if "{dist" in msg else msg
 
         if status == "TERMINUS_RESTRICTION":
-            # Matatu CBD restriction — always show if destination is likely CBD
-            return msg if msg else None
+            # Matatu CBD restriction — only warn when the destination is
+            # likely the city centre (not a known outer suburb).
+            if _dest_is_cbd(destination, city):
+                return msg if msg else None
+            return None
 
         if status == "NIGHT_CURFEW":
             # Only warn at night — check time
@@ -593,9 +628,18 @@ def suggest_alternative_mode(
 # ── Departure advice ──────────────────────────────────────────
 
 def get_departure_advice(
-    congestion: str, weather: str, travel_time: float, mode: str
+    congestion: str, weather: str, travel_time: float, mode: str,
+    safety_score: float = 100.0,
 ) -> str:
-    MIN_SAVING = 4   # don't recommend waiting for less than 4 min saving
+    """Return timed departure advice.
+
+    safety_score is passed so that a clear-weather / low-congestion
+    scenario does not produce 'conditions are good' when the route or
+    mode carries elevated safety risk (score < 50).
+    """
+    MIN_SAVING  = 4     # don't recommend waiting for < 4 min saving
+    LOW_SAFETY  = safety_score < 50
+
     if congestion == "High" and weather in ["Rainy","Foggy"]:
         saved = round(travel_time * 0.30)
         if saved < MIN_SAVING:
@@ -608,6 +652,13 @@ def get_departure_advice(
         return f"Wait 15 min — conditions may ease and save ~{saved} min."
     elif weather in ["Rainy","Foggy"]:
         return "Leave now but allow extra time — weather is reducing speeds."
+    elif LOW_SAFETY:
+        # Safety score is a baseline property of the mode/city — traffic and
+        # weather may be clear but the route/mode still carries elevated risk.
+        return (
+            "Leave now, but exercise extra caution — "
+            f"safety score {safety_score:.0f}/100 indicates elevated risk on this route."
+        )
     else:
         return "Leave now — conditions are good."
 
@@ -659,7 +710,8 @@ def generate_ai_explanation(
     elif rq_score > 70:
         lines.append(f"Road quality is good ({rq_score:.0f}/100).")
 
-    # Matatu route number tip — tells user which route to board
+    # Matatu route number tip — tells user which route to board.
+    # This is additive information not shown elsewhere in the UI.
     if mode.lower() == "matatu" and city.lower() in ["nairobi"]:
         route_info = get_matatu_route(origin.split(",")[0].lower().strip(), city)
         if route_info:
@@ -669,33 +721,22 @@ def generate_ai_explanation(
                 f"via {route_info['via']}."
             )
 
-    # Mode-specific warning
-    if mode.lower() in ["okada","boda_boda","boda"] and weather in ["Rainy","Foggy"]:
-        lines.append(f"⚠️ {mode_label} in wet conditions carries elevated crash risk.")
-    elif mode.lower() == "walking" and distance_km > 3:
+    # Walking distance note — not shown in any separate card.
+    if mode.lower() == "walking" and distance_km > 3:
         lines.append(f"⚠️ {distance_km:.1f}km is a long walk — consider a faster mode.")
 
-    # Safety
-    if safety_score >= 75:
-        lines.append(f"Safety score {safety_score:.0f}/100 — relatively safe corridor.")
-    elif safety_score >= 50:
-        lines.append(f"Safety score {safety_score:.0f}/100 — exercise normal caution.")
-    else:
-        lines.append(
-            f"Safety score {safety_score:.0f}/100 — elevated risk. "
-            f"Drive carefully and stay alert."
-        )
-
-    # Quality verdict
+    # Quality verdict — summarises the ML model output.
     lines.append(f"Commute quality: {quality['emoji']} {quality['label']}.")
 
-    # Departure advice
+    # Departure advice — only appended here when it contains a "Wait" recommendation,
+    # because the separate blue banner already shows it; repeating it in the paragraph
+    # is redundant for the "Leave now" variants.
     if "Wait" in departure_advice:
         lines.append(departure_advice)
 
-    # Alternative suggestion
-    if alt_suggestion:
-        lines.append(alt_suggestion)
+    # NOTE: safety score, mode rain warning, and alt_suggestion are intentionally
+    # omitted here — they are rendered as dedicated cards in the frontend and
+    # appending them here would cause every piece to display twice.
 
     return " ".join(lines)
 
@@ -883,10 +924,12 @@ async def predict(req: PredictRequest):
     )
 
     # 7. Departure advice
-    departure_advice = get_departure_advice(congestion, weather, travel_time, mode)
+    departure_advice = get_departure_advice(congestion, weather, travel_time, mode, safety_score)
 
     # 8. Alternative suggestion
-    alt_suggestion = suggest_alternative_mode(mode, city, congestion, weather, distance_km)
+    alt_suggestion = suggest_alternative_mode(
+        mode, city, congestion, weather, distance_km, destination=req.destination
+    )
 
     # 9. AI explanation
     ai_explanation = generate_ai_explanation(
@@ -1072,16 +1115,18 @@ def calculate_confidence(
     score      = 60 if is_weekend else 50  # base confidence
     contributors = []
 
-    # Community reports boost confidence
+    # Community reports boost confidence.
+    # Reports are user-submitted, not independently verified — use "filed",
+    # not "confirmed", to avoid implying external validation.
     if community_reports >= 5:
         score += 25
-        contributors.append(f"{community_reports} community reports confirmed")
+        contributors.append(f"{community_reports} community reports filed")
     elif community_reports >= 2:
         score += 15
-        contributors.append(f"{community_reports} community reports")
+        contributors.append(f"{community_reports} community reports filed")
     elif community_reports == 1:
         score += 8
-        contributors.append("1 community report")
+        contributors.append("1 community report filed")
 
     # Weather confirmation
     if weather in ["Rainy", "Foggy"]:
@@ -1118,8 +1163,12 @@ def calculate_confidence(
 
     score = min(98, max(35, score))  # cap at 98 — never claim 100%
 
-    # Confidence label
-    if score >= 85:
+    # Confidence label — threshold for "High" is 90, not 85.
+    # Without live TomTom data the score is built from pattern matching
+    # (time-of-day, road quality, weather API), not measured conditions.
+    # Requiring 90 prevents reaching "High" on estimate-only inputs with
+    # only community reports and weather, which would overstate certainty.
+    if score >= 90:
         label = "High"
         emoji = "🟢"
     elif score >= 65:
@@ -1377,13 +1426,15 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     )
 
     # Departure advice
-    departure_advice = get_departure_advice(congestion, weather, travel_time, mode)
+    departure_advice = get_departure_advice(congestion, weather, travel_time, mode, safety_score)
 
     # Demand balancer
     staggered = get_staggered_departure(user_id, congestion, travel_time, req.time)
 
     # Alternative suggestion (mode restrictions + better mode tips)
-    alt_suggestion = suggest_alternative_mode(mode, city, congestion, weather, distance_km)
+    alt_suggestion = suggest_alternative_mode(
+        mode, city, congestion, weather, distance_km, destination=req.destination
+    )
 
     # Walk-to-transit — when driving is stuck, suggest walking to transit hub
     # Uses real origin coordinates for accurate walking distance calculation
