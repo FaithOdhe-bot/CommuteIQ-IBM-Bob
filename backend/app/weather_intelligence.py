@@ -46,8 +46,11 @@ FLOOD_ZONES = {
         (-1.308, -1.295, 36.760, 36.785, "Ngong Road Lowlands",  "Medium"),
     ],
     "abuja": [
-        (-8.90, -8.85, 7.35, 7.45, "Wuse Drainage Areas", "Medium"),
-        (-9.05, -9.00, 7.40, 7.50, "Garki Lowlands",      "Low"),
+        # Corrected from wrong-hemisphere entries (negative lat was a typo).
+        # Abuja FCT is at ~9.0-9.1°N. Source: Wuse II ~9.04-9.10°N, 7.44-7.55°E;
+        # Garki ~9.00-9.07°N, 7.44-7.52°E (consistent with CITY_COORDS abuja lat 9.0765).
+        (9.04, 9.10, 7.44, 7.55, "Wuse Drainage Areas", "Medium"),
+        (9.00, 9.07, 7.44, 7.52, "Garki Lowlands",      "Low"),
     ],
     "kano": [
         (11.99, 12.03, 8.49, 8.55, "Kano City Drainage", "Medium"),

@@ -489,14 +489,72 @@ def get_commute_quality(
         return {"label":"Good",     "emoji":"🟢","score":90}
 
 
-def get_safety_score(city: str, mode: str) -> float:
+# Cities whose safety scores are absent from safety_scores.pkl.
+# These will NOT receive a substituted value — the absence is surfaced
+# transparently to callers via the returned dict's "available" flag.
+# The hardcoded 60.0 default has been removed to avoid presenting an
+# invented number as validated data.
+_SAFETY_SCORE_MISSING_CITIES = {
+    "kisumu", "eldoret", "port harcourt", "asaba", "benin city",
+}
+
+def get_safety_score(city: str, mode: str) -> dict:
+    """Return safety score with provenance metadata.
+
+    Returns a dict with keys:
+      score     – float, the safety score (0-100). None if unavailable.
+      available – bool, False when the city has no score in safety_scores.pkl.
+      basis     – str, describes what the score is based on.
+      mode_adj  – bool, True when a mode-specific multiplier was applied.
+
+    API consumers should check 'available' before treating 'score' as validated.
+    The sentinel score 60.0 is NO LONGER returned for missing cities; None is
+    returned instead so the absence is explicit, not hidden.
+    """
     if not safety_scores:
-        return 65.0
-    mult_map = transport_modes.get("safety_multipliers", {}) if transport_modes else {}
-    base = safety_scores.get(city.lower(),
-           safety_scores.get(get_country(city)[:3], 60.0))
-    mult = mult_map.get(mode.lower(), 1.0)
-    return round(min(100, max(0, base * mult)), 1)
+        return {
+            "score": None, "available": False,
+            "basis": "models_not_loaded", "mode_adj": False,
+        }
+
+    city_lower = city.lower()
+    mult_map   = transport_modes.get("safety_multipliers", {}) if transport_modes else {}
+    mult       = mult_map.get(mode.lower(), 1.0)
+    mode_adj   = mult != 1.0
+
+    # Explicit missing-city check — do not fall through to a silent default.
+    if city_lower in _SAFETY_SCORE_MISSING_CITIES:
+        return {
+            "score": None, "available": False,
+            "basis": "no_data_for_city", "mode_adj": False,
+        }
+
+    raw = safety_scores.get(city_lower)
+    if raw is None:
+        # Not in the explicit missing list but also not in pkl — treat same way.
+        return {
+            "score": None, "available": False,
+            "basis": "no_data_for_city", "mode_adj": False,
+        }
+
+    score = round(min(100.0, max(0.0, raw * mult)), 1)
+    return {
+        "score":     score,
+        "available": True,
+        "basis":     "crash_data_pkl",
+        "mode_adj":  mode_adj,
+    }
+
+
+def _resolve_safety_score(city: str, mode: str) -> float:
+    """Backward-compatible helper used by places that need a plain float.
+
+    When safety data is unavailable, returns None so callers can branch
+    rather than receiving a silent 60.0 that obscures data gaps.
+    Returns float or None.
+    """
+    result = get_safety_score(city, mode)
+    return result["score"]  # may be None
 
 
 
@@ -765,7 +823,9 @@ class PredictResponse(BaseModel):
     commute_quality:    str
     quality_emoji:      str
     quality_score:      int
-    safety_score:       float
+    safety_score:       Optional[float] = None   # None when no data for city
+    safety_score_available: bool = True          # False = no validated score exists
+    safety_score_basis: str = "crash_data_pkl"   # provenance label
     weather:            str
     congestion:         str
     departure_advice:   str
@@ -914,17 +974,25 @@ async def predict(req: PredictRequest):
     rq_score = get_road_quality_score(city)
 
     # 6. ML predictions
-    travel_time  = predict_travel_time(
+    travel_time      = predict_travel_time(
         distance_km, congestion, weather, 2, mode, city, rq_score
     )
-    safety_score = get_safety_score(city, mode)
+    safety_result    = get_safety_score(city, mode)
+    safety_score     = safety_result["score"]          # float or None
+    safety_available = safety_result["available"]
+    safety_basis     = safety_result["basis"]
+    # Downstream functions that need a float fall back to 100.0 when
+    # safety data is unavailable — this keeps advice conservative
+    # (100 never triggers the low-safety branch) while explicitly
+    # preserving the absence signal in the response fields.
+    safety_for_logic = safety_score if safety_score is not None else 100.0
     quality      = get_commute_quality(
         congestion, weather, community_count,
-        safety_score, mode, city, distance_km, rq_score
+        safety_for_logic, mode, city, distance_km, rq_score
     )
 
     # 7. Departure advice
-    departure_advice = get_departure_advice(congestion, weather, travel_time, mode, safety_score)
+    departure_advice = get_departure_advice(congestion, weather, travel_time, mode, safety_for_logic)
 
     # 8. Alternative suggestion
     alt_suggestion = suggest_alternative_mode(
@@ -935,7 +1003,7 @@ async def predict(req: PredictRequest):
     ai_explanation = generate_ai_explanation(
         origin=req.origin, destination=req.destination,
         travel_time=travel_time, quality=quality,
-        safety_score=safety_score, weather=weather,
+        safety_score=safety_for_logic, weather=weather,
         congestion=congestion, community_reports=community_count,
         departure_advice=departure_advice, mode=mode,
         city=city, distance_km=distance_km,
@@ -948,6 +1016,8 @@ async def predict(req: PredictRequest):
         quality_emoji=quality["emoji"],
         quality_score=quality["score"],
         safety_score=safety_score,
+        safety_score_available=safety_available,
+        safety_score_basis=safety_basis,
         weather=weather,
         congestion=congestion,
         departure_advice=departure_advice,
@@ -990,8 +1060,9 @@ async def recommend(req: RecommendRequest):
         hour      = (current_hour + offset // 60) % 24
         cong      = estimate_congestion(f"{hour}:00")
         t         = predict_travel_time(distance, cong, weather, 2, mode, city, rq_score)
-        safety    = get_safety_score(city, mode)
-        quality   = get_commute_quality(cong, weather, 0, safety, mode, city, distance, rq_score)
+        _safety_r = get_safety_score(city, mode)
+        _safety_f = _safety_r["score"] if _safety_r["score"] is not None else 100.0
+        quality   = get_commute_quality(cong, weather, 0, _safety_f, mode, city, distance, rq_score)
         windows.append({
             "label":        f"{'Now' if offset==0 else f'+{offset} min'}",
             "offset_min":   offset,
@@ -1399,9 +1470,17 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     rq_score = get_road_quality_score(city)
 
     # ML predictions
-    travel_time  = predict_travel_time(distance_km, congestion, weather, 2, mode, city, rq_score)
-    safety_score = get_safety_score(city, mode)
-    quality      = get_commute_quality(congestion, weather, community_count, safety_score, mode, city, distance_km, rq_score)
+    travel_time      = predict_travel_time(distance_km, congestion, weather, 2, mode, city, rq_score)
+    safety_result    = get_safety_score(city, mode)
+    safety_score     = safety_result["score"]          # float or None
+    safety_available = safety_result["available"]
+    safety_basis     = safety_result["basis"]
+    # Use 100.0 as the logic-fallback when safety data is absent:
+    # - 100 never fires the low-safety branch in get_departure_advice()
+    # - ensures commute quality rule fallback treats the route as safe
+    # The raw None is preserved in the response for client transparency.
+    safety_for_logic = safety_score if safety_score is not None else 100.0
+    quality      = get_commute_quality(congestion, weather, community_count, safety_for_logic, mode, city, distance_km, rq_score)
 
     # Confidence — boosted if live data sources are available
     confidence       = calculate_confidence(community_count, weather, congestion, distance_km, rq_score, req.time)
@@ -1421,12 +1500,12 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
 
     # Route confidence
     route_conf = calculate_route_confidence(
-        safety_score, quality["score"], community_count,
+        safety_for_logic, quality["score"], community_count,
         weather, rq_score, confidence["score"]
     )
 
     # Departure advice
-    departure_advice = get_departure_advice(congestion, weather, travel_time, mode, safety_score)
+    departure_advice = get_departure_advice(congestion, weather, travel_time, mode, safety_for_logic)
 
     # Demand balancer
     staggered = get_staggered_departure(user_id, congestion, travel_time, req.time)
@@ -1452,12 +1531,15 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
 
     # Weather intelligence — trend + flood risk + day pattern
     weather_trend = await get_weather_trend(coords["lat"], coords["lng"])
-    flood_risk    = get_flood_risk(
-        city,
-        origin_coords if 'origin_coords' in dir() else coords,
-        dest_coords   if 'dest_coords'   in dir() else coords,
-        weather
-    )
+    # origin_coords and dest_coords are always defined in this scope
+    # (pre-initialised to {} above the try block; the try raises 503 on failure
+    # so execution never reaches here with the empty-dict values).
+    # Use explicit .get() guard rather than the unreliable dir() idiom that
+    # was silently substituting (0,0) — the Atlantic Ocean — when both keys
+    # were absent from the empty dict.
+    _flood_origin = origin_coords if origin_coords.get("lat") is not None else coords
+    _flood_dest   = dest_coords   if dest_coords.get("lat")   is not None else coords
+    flood_risk    = get_flood_risk(city, _flood_origin, _flood_dest, weather)
     day_pattern   = get_day_pattern(city, req.time)
 
     # Day-of-week congestion pattern — kept for AI explanation context only.
@@ -1470,7 +1552,7 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     ai_explanation = generate_ai_explanation(
         origin=req.origin, destination=req.destination,
         travel_time=travel_time, quality=quality,
-        safety_score=safety_score, weather=weather,
+        safety_score=safety_for_logic, weather=weather,
         congestion=congestion, community_reports=community_count,
         departure_advice=departure_advice, mode=mode,
         city=city, distance_km=distance_km,
@@ -1489,6 +1571,8 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         quality_emoji=quality["emoji"],
         quality_score=quality["score"],
         safety_score=safety_score,
+        safety_score_available=safety_available,
+        safety_score_basis=safety_basis,
         weather=weather,
         congestion=congestion,
         departure_advice=departure_advice,

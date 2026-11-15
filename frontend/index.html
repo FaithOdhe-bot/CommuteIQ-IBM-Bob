@@ -828,10 +828,20 @@ form.addEventListener("submit", async e => {
 function renderResults(d, origin, dest, city, modeKey) {
 
   // ── Mode confirmation ──
+  // Build with safe DOM methods — origin and dest are raw user input;
+  // mLabel comes from the API response. Using innerHTML on untrusted strings
+  // is an XSS vector even if escaping is applied. DOM construction is safer.
   const mLabel = d.mode_label || modeKey;
   const mEmoji = d.mode_emoji || "";
-  el("mode-confirm").innerHTML =
-    `${mEmoji} <strong>${mLabel}</strong> · ${origin} → ${dest}`;
+  const confirmEl = el("mode-confirm");
+  confirmEl.textContent = "";                        // clear previous content
+  if (mEmoji) {
+    confirmEl.appendChild(document.createTextNode(mEmoji + " "));
+  }
+  const strong = document.createElement("strong");
+  strong.textContent = mLabel;
+  confirmEl.appendChild(strong);
+  confirmEl.appendChild(document.createTextNode(" · " + origin + " → " + dest));
 
   // ── Stat row ──
   el("stat-time").textContent = Math.round(d.travel_time_min);

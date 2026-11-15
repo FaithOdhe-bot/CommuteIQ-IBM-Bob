@@ -287,8 +287,11 @@ class TestEndpointSafetyConsistency:
             ("app.main.get_weather_trend",       AsyncMock(return_value={"trend":"stable"})),
             ("app.main.get_flood_risk",          MagicMock(return_value={"risk":"Low","zones":[]})),
             ("app.main.get_day_pattern",         MagicMock(return_value={"day":"Monday","congestion_mult":1.0,"description":"Normal"})),
-            # Force a low safety score
-            ("app.main.get_safety_score",        MagicMock(return_value=28.0)),
+            # Force a low safety score — get_safety_score now returns a dict
+            ("app.main.get_safety_score",        MagicMock(return_value={
+                "score": 28.0, "available": True,
+                "basis": "crash_data_pkl", "mode_adj": True,
+            })),
         ]
 
         started = []
