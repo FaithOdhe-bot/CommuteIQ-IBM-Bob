@@ -489,14 +489,25 @@ def get_commute_quality(
         return {"label":"Good",     "emoji":"🟢","score":90}
 
 
-# Cities whose safety scores are absent from safety_scores.pkl.
-# These will NOT receive a substituted value — the absence is surfaced
-# transparently to callers via the returned dict's "available" flag.
-# The hardcoded 60.0 default has been removed to avoid presenting an
-# invented number as validated data.
-_SAFETY_SCORE_MISSING_CITIES = {
-    "kisumu", "eldoret", "port harcourt", "asaba", "benin city",
+# City-name → pkl key aliases for cities whose scores are stored under a
+# different key (state/county name) than the city name used in CITY_COORDS.
+#
+# Data provenance:
+#  Nigerian cities:  scores derived from FRSC/NBS crash data aggregated by state.
+#    - port harcourt → "rivers" state (Rivers State, FRSC crash CSV)
+#    - asaba         → "delta" state   (Delta State, FRSC crash CSV)
+#    - benin city    → "edo" state     (Edo State, FRSC crash CSV)
+#  Kenyan cities: scores derived from NTSA Kenya accident data aggregated by county.
+#    - kisumu        → "ke_kisumu"     (Kisumu County, Kenya accidents CSV)
+#    - eldoret       → "ke_uasin gishu" (Uasin Gishu County, Kenya accidents CSV)
+_SAFETY_SCORE_ALIASES = {
+    "port harcourt": "rivers",
+    "asaba":         "delta",
+    "benin city":    "edo",
+    "kisumu":        "ke_kisumu",
+    "eldoret":       "ke_uasin gishu",
 }
+
 
 def get_safety_score(city: str, mode: str) -> dict:
     """Return safety score with provenance metadata.
@@ -508,8 +519,6 @@ def get_safety_score(city: str, mode: str) -> dict:
       mode_adj  – bool, True when a mode-specific multiplier was applied.
 
     API consumers should check 'available' before treating 'score' as validated.
-    The sentinel score 60.0 is NO LONGER returned for missing cities; None is
-    returned instead so the absence is explicit, not hidden.
     """
     if not safety_scores:
         return {
@@ -522,16 +531,11 @@ def get_safety_score(city: str, mode: str) -> dict:
     mult       = mult_map.get(mode.lower(), 1.0)
     mode_adj   = mult != 1.0
 
-    # Explicit missing-city check — do not fall through to a silent default.
-    if city_lower in _SAFETY_SCORE_MISSING_CITIES:
-        return {
-            "score": None, "available": False,
-            "basis": "no_data_for_city", "mode_adj": False,
-        }
+    # Resolve aliases first — some city names map to state/county keys in the pkl
+    lookup_key = _SAFETY_SCORE_ALIASES.get(city_lower, city_lower)
+    raw        = safety_scores.get(lookup_key)
 
-    raw = safety_scores.get(city_lower)
     if raw is None:
-        # Not in the explicit missing list but also not in pkl — treat same way.
         return {
             "score": None, "available": False,
             "basis": "no_data_for_city", "mode_adj": False,

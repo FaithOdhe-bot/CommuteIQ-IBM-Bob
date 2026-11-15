@@ -167,60 +167,36 @@ class TestFloodRiskCoordGuard:
 
 class TestSafetyScoreMissingCities:
     """
-    Cities absent from safety_scores.pkl must return available=False and score=None.
-    No invented scores must be returned.
+    All 13 CommuteIQ cities must return a valid, available safety score.
+
+    The five cities that appeared to have no data were stored under state/county
+    keys in safety_scores.pkl (e.g. kisumu -> ke_kisumu, port harcourt -> rivers).
+    The alias table in get_safety_score() resolves these.
     """
 
-    MISSING_CITIES = ["kisumu", "eldoret", "port harcourt", "asaba", "benin city"]
-    PRESENT_CITIES = ["nairobi", "lagos", "kano", "abuja", "mombasa", "enugu",
-                      "nakuru", "ibadan"]
+    # All 13 supported cities — previously 5 appeared missing
+    ALL_CITIES = [
+        "nairobi", "lagos", "kano", "abuja", "mombasa", "enugu",
+        "nakuru", "ibadan",
+        # Previously "missing" — now resolved via alias table:
+        "kisumu", "eldoret", "port harcourt", "asaba", "benin city",
+    ]
 
     def _score(self, city, mode="driving"):
         from app.main import get_safety_score
         return get_safety_score(city, mode)
 
-    # ── Missing cities ────────────────────────────────────────────
-
-    @pytest.mark.parametrize("city", MISSING_CITIES)
-    def test_missing_city_returns_available_false(self, city):
-        result = self._score(city)
-        assert result["available"] is False, (
-            f"{city}: expected available=False, got {result}"
-        )
-
-    @pytest.mark.parametrize("city", MISSING_CITIES)
-    def test_missing_city_score_is_none(self, city):
-        result = self._score(city)
-        assert result["score"] is None, (
-            f"{city}: expected score=None (no data), got score={result['score']}"
-        )
-
-    @pytest.mark.parametrize("city", MISSING_CITIES)
-    def test_missing_city_basis_is_no_data(self, city):
-        result = self._score(city)
-        assert result["basis"] == "no_data_for_city", (
-            f"{city}: basis should be 'no_data_for_city', got '{result['basis']}'"
-        )
-
-    def test_missing_city_never_returns_60(self):
-        """The old 60.0 sentinel must never be returned for a missing city."""
-        for city in self.MISSING_CITIES:
-            result = self._score(city)
-            assert result["score"] != 60.0, (
-                f"{city}: returned the old silent 60.0 fallback — fix not applied"
-            )
-
-    # ── Present cities ────────────────────────────────────────────
-
-    @pytest.mark.parametrize("city", PRESENT_CITIES)
-    def test_present_city_returns_available_true(self, city):
+    @pytest.mark.parametrize("city", ALL_CITIES)
+    def test_all_cities_return_available_true(self, city):
+        """Every supported city must have a validated safety score after alias fix."""
         result = self._score(city)
         assert result["available"] is True, (
-            f"{city}: expected available=True, got {result}"
+            f"{city}: available=False — alias table may be missing this city. "
+            f"result={result}"
         )
 
-    @pytest.mark.parametrize("city", PRESENT_CITIES)
-    def test_present_city_score_is_float_in_range(self, city):
+    @pytest.mark.parametrize("city", ALL_CITIES)
+    def test_all_cities_score_is_float_in_range(self, city):
         result = self._score(city)
         assert isinstance(result["score"], float), (
             f"{city}: score should be float, got {type(result['score'])}"
@@ -228,6 +204,32 @@ class TestSafetyScoreMissingCities:
         assert 0.0 <= result["score"] <= 100.0, (
             f"{city}: score {result['score']} out of range [0, 100]"
         )
+
+    def test_previously_missing_cities_now_resolve(self):
+        """Spot-check the five previously-missing cities specifically."""
+        from app.main import get_safety_score
+        checks = {
+            "kisumu":        82.3,  # ke_kisumu
+            "eldoret":       91.6,  # ke_uasin gishu (driving mult=1.0)
+            "port harcourt": 95.3,  # rivers
+            "asaba":         83.2,  # delta
+            "benin city":    81.7,  # edo
+        }
+        for city, expected_base in checks.items():
+            result = get_safety_score(city, "driving")
+            assert result["available"] is True, f"{city}: still unavailable"
+            assert abs(result["score"] - expected_base) < 1.0, (
+                f"{city}: expected ~{expected_base}, got {result['score']}"
+            )
+
+    def test_missing_city_never_returns_60_when_unavailable(self):
+        """When no data exists, score must be None not 60.0."""
+        from app.main import get_safety_score
+        result = get_safety_score("unknown_city_xyz", "driving")
+        if not result["available"]:
+            assert result["score"] is None, (
+                "Unavailable city returned 60.0 instead of None"
+            )
 
     # ── Mode multiplier ───────────────────────────────────────────
 
