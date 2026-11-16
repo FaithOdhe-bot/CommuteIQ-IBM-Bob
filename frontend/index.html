@@ -495,7 +495,7 @@
            aria-valuemin="0" aria-valuemax="100" id="safety-bar-track">
         <div class="safety-bar-fill" id="safety-bar" style="width:0%"></div>
       </div>
-      <div class="safety-note">
+      <div class="safety-note" id="safety-note">
         Based on national crash statistics and transport mode risk factors.
         Not a per-corridor measurement. Independent of commute quality below.
       </div>
@@ -903,13 +903,47 @@ function renderResults(d, origin, dest, city, modeKey) {
   }
 
   // ── Safety bar ──
-  const score  = d.safety_score;
-  const barEl  = el("safety-bar");
-  const trackEl = el("safety-bar-track");
-  barEl.style.width      = `${score}%`;
-  barEl.style.background = safetyColor(score);
-  trackEl.setAttribute("aria-valuenow", String(Math.round(score)));
-  el("safety-val").textContent = `${score.toFixed(0)} / 100`;
+  // safety_score may be null when safety data is unavailable for the city.
+  // safety_score_is_hardcoded flags Nairobi and Lagos as unvalidated overrides.
+  // safety_score_granularity distinguishes state-level from city-level scores.
+  const score     = d.safety_score;
+  const barEl     = el("safety-bar");
+  const trackEl   = el("safety-bar-track");
+  const safetyNote = el("safety-note");
+
+  if (score != null) {
+    barEl.style.width      = `${score}%`;
+    barEl.style.background = safetyColor(score);
+    trackEl.setAttribute("aria-valuenow", String(Math.round(score)));
+    el("safety-val").textContent = `${score.toFixed(0)} / 100`;
+
+    // Build provenance note — overrides the static HTML text
+    let noteLines = ["Based on national crash statistics and transport mode risk factors.",
+                     "Not a per-corridor measurement. Independent of commute quality below."];
+    if (d.safety_score_is_hardcoded) {
+      noteLines.push("⚠️ Nairobi and Lagos scores are manually set city-level estimates, " +
+                     "not independently derived from crash statistics. Treat as indicative only.");
+    }
+    const gran = d.safety_score_granularity;
+    if (gran === "state") {
+      noteLines.push("Geographic scope: state-level aggregate (not specific to this route).");
+    } else if (gran === "county") {
+      noteLines.push("Geographic scope: county-level aggregate (not specific to this route).");
+    } else if (gran === "city_estimate") {
+      noteLines.push("Geographic scope: single city-wide estimate (not route-specific).");
+    }
+    if (d.safety_score_is_historical) {
+      noteLines.push("Historical data only — does not reflect current road conditions.");
+    }
+    safetyNote.textContent = noteLines.join(" ");
+  } else {
+    // No safety data for this city
+    barEl.style.width      = "0%";
+    barEl.style.background = "#e5e7eb";
+    trackEl.setAttribute("aria-valuenow", "0");
+    el("safety-val").textContent = "—";
+    safetyNote.textContent = "Safety score not available for this city.";
+  }
 
   // ── Commute quality badge ──
   const qClass = qualityClass(d.commute_quality);
@@ -957,11 +991,20 @@ function renderResults(d, origin, dest, city, modeKey) {
   }
 
   // ── Secondary stats ──
+  // road_quality_score is ALWAYS returned by the backend (it defaults to 50.0 when
+  // unavailable). road_quality_available=false means 50.0 is a neutral fallback
+  // sentinel, NOT a real measurement. Never display the sentinel as a measurement.
   const secStats = el("secondary-stats");
   secStats.innerHTML = "";
-  if (d.road_quality_score != null) {
-    // Road quality comes from the road_quality.pkl model — label as estimated.
-    secStats.appendChild(makeSecStat("🛣️", "Road quality (est.)", `${d.road_quality_score}/100`));
+  if (d.road_quality_available === true && d.road_quality_score != null) {
+    // Real data — display with the data source label
+    const srcLabel = d.road_quality_source === "named_road_pkl"
+      ? "Road quality (named road)"
+      : "Road quality (city avg, est.)";
+    secStats.appendChild(makeSecStat("🛣️", srcLabel, `${d.road_quality_score}/100`));
+  } else {
+    // Unavailable — show explicit "unavailable" text; never show the 50.0 sentinel
+    secStats.appendChild(makeSecStat("🛣️", "Road quality", "data unavailable"));
   }
   if (d.quality_score != null) {
     secStats.appendChild(makeSecStat("📊", "Quality score", `${d.quality_score}/100`));

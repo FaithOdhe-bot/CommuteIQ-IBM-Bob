@@ -1614,17 +1614,34 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         congestion        = intel["congestion"]
         live_intel_data   = intel
     except Exception:
-        congestion        = estimate_congestion(req.time)
-        live_intel_data   = {"congestion": congestion, "incidents": [], "confidence_boost": 0, "data_sources": ["time_of_day_estimate"]}
+        congestion      = estimate_congestion(req.time)
+        live_intel_data = {
+            "congestion":               congestion,
+            "incidents":                [],
+            "community_incidents":      [],
+            "community_incident_count": 0,
+            "confidence_boost":         0,
+            "data_sources":             ["time_of_day_estimate"],
+            "congestion_method":        "time_of_day_heuristic",
+            "congestion_note":          "Congestion estimated from time of day (heuristic). "
+                                        "Set TOMTOM_API_KEY for measured traffic data.",
+            "provider_health":          {},
+        }
 
-    # Community reports — combine Supabase reports with live intelligence incidents
+    # Community reports — Supabase user-submitted reports only count as community reports.
+    # Third-party live intelligence incidents (news, TomTom, OSM) are tracked separately
+    # via community_incidents (geo-verified, confidence >= threshold) so we do not
+    # inflate the community report count with unverified news items.
     all_reports      = await list_reports(city)
     active_reps      = get_active_reports(all_reports, city)
-    live_incidents   = live_intel_data.get("incidents", [])
     incident_types   = ["accident", "flood", "road_closure", "heavy_traffic"]
-    # Merge: Supabase user reports + live intelligence incidents
-    all_incidents    = active_reps + live_incidents
-    community_count  = len([r for r in all_incidents if r.get("type") in incident_types])
+
+    # community_count = user-submitted Supabase reports + geo-verified third-party incidents
+    # (geo_verified=True, confidence >= GEO_CONFIDENCE_THRESHOLD from live_intelligence.py)
+    verified_live    = live_intel_data.get("community_incidents", [])
+    supabase_count   = len([r for r in active_reps if r.get("type") in incident_types])
+    third_party_count= len([r for r in verified_live if r.get("type") in incident_types])
+    community_count  = supabase_count + third_party_count
 
     # Road quality
     rq_result    = get_road_quality_score(city)
@@ -1761,27 +1778,25 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         flood_risk=flood_risk if flood_risk["risk"] != "Low" else None,
         day_pattern=day_pattern,
         live_intelligence={
-            # Task B: normalized evidence layer with source, freshness, and
-            # verification status. Distinguishes measured vs estimated congestion.
-            "sources":          live_intel_data.get("data_sources", ["time_of_day_estimate"]),
-            "is_live":          (
-                live_intel_data.get("incidents", []) != []
-                or live_intel_data.get("congestion_detail", {}).get("live", False)
-            ),
-            "live_incidents":   len(live_intel_data.get("incidents", [])),
-            "tomtom_active":    live_intel_data.get("congestion_detail", {}).get("source") == "TomTom live traffic",
-            "flow_ratio":       live_intel_data.get("congestion_detail", {}).get("flow_ratio"),
-            # Explicitly report when live traffic measurement is unavailable
-            "congestion_method": (
-                "TomTom live flow measurement"
-                if live_intel_data.get("congestion_detail", {}).get("live")
-                else "time_of_day_heuristic"
-            ),
-            "congestion_note": (
-                None
-                if live_intel_data.get("congestion_detail", {}).get("live")
-                else "No live traffic data available — congestion estimated from time-of-day pattern only."
-            ),
+            # Normalized evidence layer — source, freshness, and verification status.
+            # Distinguishes measured vs estimated congestion.
+            "sources":                  live_intel_data.get("data_sources", ["time_of_day_estimate"]),
+            "is_live":                  live_intel_data.get("congestion_detail", {}).get("live", False),
+            "live_incidents":           live_intel_data.get("incident_count", 0),
+            "community_incidents":      live_intel_data.get("community_incident_count", 0),
+            "tomtom_active":            live_intel_data.get("congestion_detail", {}).get("source") == "TomTom live traffic",
+            "flow_ratio":               live_intel_data.get("congestion_detail", {}).get("flow_ratio"),
+            # congestion_method and congestion_note come directly from the intelligence
+            # module — not recomputed here — so they are always consistent with the
+            # actual detection path taken (TomTom / heuristic / exception fallback).
+            "congestion_method":        live_intel_data.get("congestion_method", "time_of_day_heuristic"),
+            "congestion_note":          live_intel_data.get("congestion_note",
+                                            "Congestion estimated from time of day (heuristic). "
+                                            "Set TOMTOM_API_KEY for measured traffic data."),
+            # Provider health — exposes availability metadata without credentials or
+            # internal stack traces.  Clients can use this to show "live data may be
+            # limited" notices when key providers are unavailable.
+            "provider_health":          live_intel_data.get("provider_health", {}),
         },
         privacy_note="CommuteIQ stores only anonymized trip data. No personally identifiable travel history is collected or required.",
         ethical_note="CommuteIQ does not allow police checkpoint or individual tracking reports.",
