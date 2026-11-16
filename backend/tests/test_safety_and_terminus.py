@@ -290,7 +290,10 @@ class TestEndpointSafetyConsistency:
             # Force a low safety score — get_safety_score now returns a dict
             ("app.main.get_safety_score",        MagicMock(return_value={
                 "score": 28.0, "available": True,
-                "basis": "crash_data_pkl", "mode_adj": True,
+                "basis": "crash_data_formula_pkl", "mode_adj": True,
+                "is_hardcoded_override": False,
+                "geographic_granularity": "state",
+                "is_historical_indicator": True,
             })),
         ]
 

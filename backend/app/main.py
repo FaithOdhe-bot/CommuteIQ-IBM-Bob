@@ -211,18 +211,52 @@ def validate_mode_for_city(mode: str, city: str) -> tuple[bool, str]:
     available = list(country_modes.keys())
     return False, f"'{mode}' is not available in {city.title()}. Available: {', '.join(available)}"
 
-def get_road_quality_score(city: str, road_name: Optional[str] = None) -> float:
+# Cities covered by road_quality.pkl city_avg.
+# All other cities fall through to the ROAD_QUALITY_UNAVAILABLE sentinel.
+_ROAD_QUALITY_CITY_AVG_CITIES = {"lagos", "kano", "abuja", "nairobi"}
+
+# Sentinel returned when no city-level road quality data is available.
+# Chosen as the midpoint of [0,100] so it has no directional bias in
+# weighted scoring (route_confidence). Callers that need to distinguish
+# "real data" from "no data" should check road_quality_score_available.
+ROAD_QUALITY_UNAVAILABLE = 50.0
+
+
+def get_road_quality_score(city: str, road_name: Optional[str] = None) -> dict:
+    """Return road quality score with availability metadata.
+
+    Returns a dict:
+      score     – float [0-100]. ROAD_QUALITY_UNAVAILABLE (50.0) when no data.
+      available – bool. False means only the neutral fallback is returned.
+      source    – str. 'named_road_pkl' | 'city_avg_pkl' | 'unavailable_fallback'
+
+    road_quality.pkl covers named roads (Nigeria 14,009 + Kenya 6,871) and
+    city averages for Lagos, Kano, Abuja, Nairobi only. All other cities
+    receive the neutral fallback; this is now explicit in the response.
+    """
     if not road_quality:
-        return 50.0
+        return {"score": ROAD_QUALITY_UNAVAILABLE, "available": False,
+                "source": "unavailable_fallback"}
+
     country = get_country(city)
-    # Try named road first
+
+    # Named road lookup (highest specificity)
     if road_name:
         road_lower = road_name.lower().strip()
         named = road_quality.get(country, {})
         if road_lower in named:
-            return named[road_lower]
-    # Fall back to city average
-    return road_quality.get("city_avg", {}).get(city.lower(), 50.0)
+            return {"score": float(named[road_lower]), "available": True,
+                    "source": "named_road_pkl"}
+
+    # City average
+    city_avg = road_quality.get("city_avg", {}).get(city.lower())
+    if city_avg is not None:
+        return {"score": float(city_avg), "available": True,
+                "source": "city_avg_pkl"}
+
+    # No data for this city — return neutral fallback, clearly labelled
+    return {"score": ROAD_QUALITY_UNAVAILABLE, "available": False,
+            "source": "unavailable_fallback"}
 
 
 # ── Weather ───────────────────────────────────────────────────
@@ -375,11 +409,44 @@ async def geocode_place(place: str, city: str) -> dict:
 
 # ── ML prediction ─────────────────────────────────────────────
 
+# Minimum plausible travel time in minutes. Any prediction below this is
+# rejected as physically impossible (a 1 km walk takes ~13 min; routing
+# returns at least 1-2 km for any two distinct geocoded points).
+_MIN_TRAVEL_TIME_MIN = 1.0
+
+# Maximum plausible single urban/intercity travel time (10 hours).
+# Predictions above this almost certainly indicate model extrapolation error.
+_MAX_TRAVEL_TIME_MIN = 600.0
+
+
+def _travel_time_is_valid(t: float) -> bool:
+    """Return True when t is a finite, positive, plausible travel time."""
+    import math
+    return (
+        isinstance(t, (int, float))
+        and math.isfinite(t)
+        and _MIN_TRAVEL_TIME_MIN <= t <= _MAX_TRAVEL_TIME_MIN
+    )
+
+
 def predict_travel_time(
     distance_km: float, congestion: str, weather: str,
     alternatives: int, mode: str, city: str, rq_score: float
 ) -> float:
-    """Predict travel time using ML model with mode + city + road quality."""
+    """Predict travel time using ML model with mode + city + road quality.
+
+    The XGBoost model (travel_time_model.pkl) was trained exclusively on
+    intercity Nigerian highway data (distance range 129–1,040 km) plus Nairobi
+    OD matrices. It is NOT validated for sub-50 km urban commutes — testing
+    showed it returned -21.6 min for a 150 km trip, confirming extrapolation
+    instability even within its nominal training range.
+
+    Decision: use the formula fallback for all trips < 50 km; apply the ML model
+    only for ≥ 50 km. If the ML model returns a negative, non-finite, or
+    implausible value, fall through to the formula regardless of distance.
+    """
+    import math
+
     cmap = encoders["congestion_map"] if encoders else {"Low":0,"Medium":1,"High":2}
     wmap = encoders["weather_map"]    if encoders else {"Clear":0,"Cloudy":1,"Foggy":2,"Rainy":3}
     mmap = encoders.get("mode_map",   {}) if encoders else {}
@@ -391,14 +458,8 @@ def predict_travel_time(
     ci_enc  = cimap.get(get_country(city), 0)
     is_peak = int(c_enc >= 1 and w_enc >= 1)
 
-    features = [[distance_km, c_enc, w_enc, alternatives, is_peak, m_enc, ci_enc, rq_score]]
-
-    # Use formula for city trips (< 50 km).
-    # The ML model was trained on Nigerian intercity highway data (Lagos→Kaduna
-    # etc.) and dramatically overcalculates short urban commutes — a 12km danfo
-    # trip returned 131 min instead of ~44 min. The transport_modes.pkl speed
-    # profiles are calibrated for city-level travel and give accurate results.
-    # Reserve ML for longer routes where intercity training is appropriate.
+    # Use formula for all city trips (< 50 km): model training range starts at
+    # 129 km, so sub-50 km inputs are out-of-distribution by a factor of ~2.6×.
     if distance_km < 50:
         return _formula_travel_time(distance_km, congestion, weather, mode, city)
 
@@ -406,7 +467,24 @@ def predict_travel_time(
         return _formula_travel_time(distance_km, congestion, weather, mode, city)
 
     try:
-        return round(float(travel_model.predict(features)[0]), 1)
+        import pandas as pd
+        feat_names = encoders.get("features") if encoders else None
+        if feat_names and len(feat_names) == 8:
+            feat_df = pd.DataFrame(
+                [[distance_km, c_enc, w_enc, alternatives, is_peak, m_enc, ci_enc, rq_score]],
+                columns=feat_names,
+            )
+            raw = float(travel_model.predict(feat_df)[0])
+        else:
+            raw = float(travel_model.predict(
+                [[distance_km, c_enc, w_enc, alternatives, is_peak, m_enc, ci_enc, rq_score]]
+            )[0])
+
+        if not _travel_time_is_valid(raw):
+            # Negative, NaN, Inf, or implausibly large/small — fall through.
+            return _formula_travel_time(distance_km, congestion, weather, mode, city)
+
+        return round(raw, 1)
     except Exception:
         return _formula_travel_time(distance_km, congestion, weather, mode, city)
 
@@ -456,9 +534,16 @@ def get_commute_quality(
     safety_score: float, mode: str, city: str,
     distance_km: float, rq_score: float
 ) -> dict:
-    """ML quality prediction with rule fallback."""
+    """ML quality prediction with rule fallback.
+
+    The RandomForest (commute_quality_model.pkl) was serialized with sklearn
+    1.8.0 against named feature arrays. We pass a named pd.DataFrame to match
+    the training schema exactly, which also suppresses the
+    'X does not have valid feature names' UserWarning.
+    """
     if quality_model and encoders:
         try:
+            import pandas as pd
             cmap  = encoders["congestion_map"]
             wmap  = encoders["weather_map"]
             mmap  = encoders.get("mode_map", {})
@@ -468,7 +553,12 @@ def get_commute_quality(
             m_enc = mmap.get(mode.lower(), 0)
             ci_enc= cimap.get(get_country(city), 0)
             is_pk = int(c_enc >= 1 and w_enc >= 1)
-            feat  = [[distance_km, c_enc, w_enc, 2, is_pk, m_enc, ci_enc, rq_score]]
+            feat_names = encoders.get("features")
+            feat_vals  = [[distance_km, c_enc, w_enc, 2, is_pk, m_enc, ci_enc, rq_score]]
+            if feat_names and len(feat_names) == 8:
+                feat = pd.DataFrame(feat_vals, columns=feat_names)
+            else:
+                feat = feat_vals   # fallback: unnamed array (triggers warning)
             pred  = int(quality_model.predict(feat)[0])
             label = encoders["quality_labels"][pred]
             emoji = encoders["quality_emoji"][pred]
@@ -508,22 +598,64 @@ _SAFETY_SCORE_ALIASES = {
     "eldoret":       "ke_uasin gishu",
 }
 
+# Cities whose safety scores in safety_scores.pkl are HARDCODED OVERRIDES
+# in train_models.py rather than formula-derived from crash statistics.
+# Specifically (see train_models.py lines 348-349):
+#   nairobi = 68.0  — hardcoded (no formula derivation; rationale: WHO Kenya
+#                     estimate ~28 fatalities/100k). NOT derived from NTSA data.
+#   lagos   = 70.0  — hardcoded (or falls through to crash-CSV formula if
+#                     "lagos" appears in crash data; train_models.py uses
+#                     scores.get("lagos", 70.0) which means 70.0 is the
+#                     default when the crash CSV has no "lagos" row).
+# Both values are single-city estimates with no documented per-route basis.
+# They are regional baseline indicators, not measured per-corridor scores.
+_SAFETY_SCORE_HARDCODED_CITIES = {"nairobi", "lagos"}
+
+# Geographic granularity for each city's score.
+# "state" = aggregated over all crashes in the state/territory.
+# "county" = aggregated over all crashes in the county.
+# "city_estimate" = single point estimate, no sub-city variation.
+_SAFETY_SCORE_GRANULARITY = {
+    "nairobi":       "city_estimate",   # hardcoded override, no crash formula
+    "lagos":         "city_estimate",   # hardcoded override
+    "abuja":         "state",           # FCT crash stats
+    "kano":          "state",
+    "mombasa":       "county",          # ke_mombasa
+    "nakuru":        "county",          # ke_nakuru
+    "ibadan":        "state",           # Oyo state
+    "enugu":         "state",
+    "port harcourt": "state",           # Rivers state
+    "asaba":         "state",           # Delta state
+    "benin city":    "state",           # Edo state
+    "kisumu":        "county",          # ke_kisumu
+    "eldoret":       "county",          # ke_uasin gishu
+}
+
 
 def get_safety_score(city: str, mode: str) -> dict:
     """Return safety score with provenance metadata.
 
     Returns a dict with keys:
-      score     – float, the safety score (0-100). None if unavailable.
-      available – bool, False when the city has no score in safety_scores.pkl.
-      basis     – str, describes what the score is based on.
-      mode_adj  – bool, True when a mode-specific multiplier was applied.
+      score                – float, the safety score (0-100). None if unavailable.
+      available            – bool, False when the city has no score in pkl.
+      basis                – str, describes what the score is based on.
+      mode_adj             – bool, True when a mode-specific multiplier was applied.
+      is_hardcoded_override – bool, True when the score is a manually set estimate
+                              rather than derived from the crash statistics formula.
+      geographic_granularity – str, describes the geographic unit for the score.
+      is_historical_indicator – bool, always True — no score reflects real-time
+                              conditions; all are derived from past crash data.
 
-    API consumers should check 'available' before treating 'score' as validated.
+    API consumers should check 'available' and 'is_hardcoded_override' before
+    treating 'score' as independently validated crash-statistics data.
     """
     if not safety_scores:
         return {
             "score": None, "available": False,
             "basis": "models_not_loaded", "mode_adj": False,
+            "is_hardcoded_override": False,
+            "geographic_granularity": "unknown",
+            "is_historical_indicator": True,
         }
 
     city_lower = city.lower()
@@ -539,14 +671,24 @@ def get_safety_score(city: str, mode: str) -> dict:
         return {
             "score": None, "available": False,
             "basis": "no_data_for_city", "mode_adj": False,
+            "is_hardcoded_override": False,
+            "geographic_granularity": "unknown",
+            "is_historical_indicator": True,
         }
+
+    is_override  = city_lower in _SAFETY_SCORE_HARDCODED_CITIES
+    granularity  = _SAFETY_SCORE_GRANULARITY.get(city_lower, "state")
+    basis        = "hardcoded_city_estimate" if is_override else "crash_data_formula_pkl"
 
     score = round(min(100.0, max(0.0, raw * mult)), 1)
     return {
-        "score":     score,
-        "available": True,
-        "basis":     "crash_data_pkl",
-        "mode_adj":  mode_adj,
+        "score":                   score,
+        "available":               True,
+        "basis":                   basis,
+        "mode_adj":                mode_adj,
+        "is_hardcoded_override":   is_override,
+        "geographic_granularity":  granularity,
+        "is_historical_indicator": True,
     }
 
 
@@ -823,25 +965,30 @@ def calculate_arrival_time(time_str: Optional[str], travel_time_min: float) -> O
 
 
 class PredictResponse(BaseModel):
-    travel_time_min:    float
-    commute_quality:    str
-    quality_emoji:      str
-    quality_score:      int
-    safety_score:       Optional[float] = None   # None when no data for city
-    safety_score_available: bool = True          # False = no validated score exists
-    safety_score_basis: str = "crash_data_pkl"   # provenance label
-    weather:            str
-    congestion:         str
-    departure_advice:   str
-    ai_explanation:     str
-    distance_km:        Optional[float] = None
-    community_reports:  int = 0
-    road_quality_score: Optional[float] = None
-    mode_label:         Optional[str] = None
-    mode_emoji:         Optional[str] = None
-    alt_suggestion:     Optional[str] = None
-    arrival_time:       Optional[str] = None
-    route_geometry:     Optional[list] = None   # [[lat,lng],...] for Leaflet Polyline
+    travel_time_min:                  float
+    commute_quality:                  str
+    quality_emoji:                    str
+    quality_score:                    int
+    safety_score:                     Optional[float] = None
+    safety_score_available:           bool = True
+    safety_score_basis:               str  = "crash_data_pkl"
+    safety_score_is_hardcoded:        bool = False   # True = single-city estimate, not formula
+    safety_score_granularity:         str  = "state" # geographic unit of the score
+    safety_score_is_historical:       bool = True    # always True — past crash data only
+    weather:                          str
+    congestion:                       str
+    departure_advice:                 str
+    ai_explanation:                   str
+    distance_km:                      Optional[float] = None
+    community_reports:                int   = 0
+    road_quality_score:               Optional[float] = None
+    road_quality_available:           bool  = True
+    road_quality_source:              str   = "city_avg_pkl"
+    mode_label:                       Optional[str] = None
+    mode_emoji:                       Optional[str] = None
+    alt_suggestion:                   Optional[str] = None
+    arrival_time:                     Optional[str] = None
+    route_geometry:                   Optional[list] = None
 
 class RecommendRequest(BaseModel):
     origin:      str
@@ -975,7 +1122,10 @@ async def predict(req: PredictRequest):
     ])
 
     # 5. Road quality
-    rq_score = get_road_quality_score(city)
+    rq_result    = get_road_quality_score(city)
+    rq_score     = rq_result["score"]
+    rq_available = rq_result["available"]
+    rq_source    = rq_result["source"]
 
     # 6. ML predictions
     travel_time      = predict_travel_time(
@@ -1022,6 +1172,9 @@ async def predict(req: PredictRequest):
         safety_score=safety_score,
         safety_score_available=safety_available,
         safety_score_basis=safety_basis,
+        safety_score_is_hardcoded=safety_result.get("is_hardcoded_override", False),
+        safety_score_granularity=safety_result.get("geographic_granularity", "state"),
+        safety_score_is_historical=True,
         weather=weather,
         congestion=congestion,
         departure_advice=departure_advice,
@@ -1029,6 +1182,8 @@ async def predict(req: PredictRequest):
         distance_km=round(distance_km, 2),
         community_reports=community_count,
         road_quality_score=round(rq_score, 1),
+        road_quality_available=rq_available,
+        road_quality_source=rq_source,
         mode_label=mode_label,
         mode_emoji=mode_emoji,
         alt_suggestion=alt_suggestion,
@@ -1044,7 +1199,8 @@ async def recommend(req: RecommendRequest):
     city    = req.city.lower().strip()
     mode    = req.mode.lower().strip()
     coords  = CITY_COORDS.get(city, {"lat": 6.5244, "lng": 3.3792})
-    rq_score= get_road_quality_score(city)
+    rq_result = get_road_quality_score(city)
+    rq_score  = rq_result["score"]
 
     try:
         o_coords = await geocode_place(req.origin, city)
@@ -1471,7 +1627,10 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     community_count  = len([r for r in all_incidents if r.get("type") in incident_types])
 
     # Road quality
-    rq_score = get_road_quality_score(city)
+    rq_result    = get_road_quality_score(city)
+    rq_score     = rq_result["score"]
+    rq_available = rq_result["available"]
+    rq_source    = rq_result["source"]
 
     # ML predictions
     travel_time      = predict_travel_time(distance_km, congestion, weather, 2, mode, city, rq_score)
@@ -1577,6 +1736,9 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         safety_score=safety_score,
         safety_score_available=safety_available,
         safety_score_basis=safety_basis,
+        safety_score_is_hardcoded=safety_result.get("is_hardcoded_override", False),
+        safety_score_granularity=safety_result.get("geographic_granularity", "state"),
+        safety_score_is_historical=True,
         weather=weather,
         congestion=congestion,
         departure_advice=departure_advice,
@@ -1584,6 +1746,8 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         distance_km=round(distance_km, 2),
         community_reports=community_count,
         road_quality_score=round(rq_score, 1),
+        road_quality_available=rq_available,
+        road_quality_source=rq_source,
         mode_label=mode_label,
         mode_emoji=mode_emoji,
         alt_suggestion=alt_suggestion,
@@ -1597,11 +1761,27 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         flood_risk=flood_risk if flood_risk["risk"] != "Low" else None,
         day_pattern=day_pattern,
         live_intelligence={
+            # Task B: normalized evidence layer with source, freshness, and
+            # verification status. Distinguishes measured vs estimated congestion.
             "sources":          live_intel_data.get("data_sources", ["time_of_day_estimate"]),
-            "is_live":          live_intel_data.get("incidents", []) != [] or live_intel_data.get("congestion_detail", {}).get("live", False),
+            "is_live":          (
+                live_intel_data.get("incidents", []) != []
+                or live_intel_data.get("congestion_detail", {}).get("live", False)
+            ),
             "live_incidents":   len(live_intel_data.get("incidents", [])),
             "tomtom_active":    live_intel_data.get("congestion_detail", {}).get("source") == "TomTom live traffic",
             "flow_ratio":       live_intel_data.get("congestion_detail", {}).get("flow_ratio"),
+            # Explicitly report when live traffic measurement is unavailable
+            "congestion_method": (
+                "TomTom live flow measurement"
+                if live_intel_data.get("congestion_detail", {}).get("live")
+                else "time_of_day_heuristic"
+            ),
+            "congestion_note": (
+                None
+                if live_intel_data.get("congestion_detail", {}).get("live")
+                else "No live traffic data available — congestion estimated from time-of-day pattern only."
+            ),
         },
         privacy_note="CommuteIQ stores only anonymized trip data. No personally identifiable travel history is collected or required.",
         ethical_note="CommuteIQ does not allow police checkpoint or individual tracking reports.",

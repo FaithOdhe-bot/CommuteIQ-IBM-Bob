@@ -4,6 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CommuteIQ — AI Mobility Assistant</title>
+  <!--
+    Task C: configurable backend URL.
+    Set the content attribute below to your deployed backend base URL when
+    hosting this file. Leave it empty for automatic localhost detection.
+    Example for Render: <meta name="commuteiq-api-base" content="https://your-app.onrender.com">
+  -->
+  <meta name="commuteiq-api-base" content="">
 
   <!-- Leaflet CSS — integrity hash verified against unpkg.com/leaflet@1.9.4/dist/leaflet.css -->
   <link
@@ -545,8 +552,31 @@
 "use strict";
 
 // ── Configuration ──────────────────────────────────────────────
-// Change this to your deployed backend URL for production.
-const API_BASE = "http://localhost:8000";
+// API_BASE is resolved from (in priority order):
+//   1. <meta name="commuteiq-api-base"> content attribute (set for deployment)
+//   2. Same origin (when the frontend is served by the same host as the API)
+//   3. Localhost default (local development fallback)
+//
+// For local development: leave the meta tag content empty.
+// For deployment: set the meta tag content to your backend URL, e.g.:
+//   <meta name="commuteiq-api-base" content="https://commuteiq.onrender.com">
+// Do NOT hardcode a production URL here — use the meta tag instead.
+(function () {
+  const metaEl  = document.querySelector('meta[name="commuteiq-api-base"]');
+  const metaVal = metaEl ? metaEl.getAttribute("content") : "";
+  if (metaVal && metaVal.trim() !== "") {
+    window.API_BASE = metaVal.trim().replace(/\/$/, "");
+  } else if (window.location.hostname !== "localhost" &&
+             window.location.hostname !== "127.0.0.1" &&
+             window.location.hostname !== "") {
+    // Served from a real host but no meta tag set — use same origin.
+    // This is a sensible default when backend and frontend share a host.
+    window.API_BASE = window.location.origin;
+  } else {
+    window.API_BASE = "http://localhost:8000";
+  }
+})();
+const API_BASE = window.API_BASE;
 
 // ── Supported cities — mirrors backend CITY_COORDS exactly ─────
 // Source: backend/app/main.py CITY_COORDS dict (13 cities total).
