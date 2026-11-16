@@ -980,7 +980,15 @@ class PredictResponse(BaseModel):
     departure_advice:                 str
     ai_explanation:                   str
     distance_km:                      Optional[float] = None
+    # community_reports: only user-submitted Supabase reports.
+    # Does NOT include TomTom, news, or OSM third-party incidents.
     community_reports:                int   = 0
+    # third_party_alerts: geo-relevance-verified third-party incident count.
+    # These are from TomTom, RSS news, Google News, and OSM — not user submissions.
+    third_party_alerts:               int   = 0
+    # total_incident_alerts: community_reports + third_party_alerts (combined hazard load).
+    # Used by safety calculations; displayed with appropriate labeling.
+    total_incident_alerts:            int   = 0
     road_quality_score:               Optional[float] = None
     road_quality_available:           bool  = True
     road_quality_source:              str   = "city_avg_pkl"
@@ -989,6 +997,8 @@ class PredictResponse(BaseModel):
     alt_suggestion:                   Optional[str] = None
     arrival_time:                     Optional[str] = None
     route_geometry:                   Optional[list] = None
+    # Model metadata — training date, not live evidence freshness
+    training_data_date:               Optional[str] = None
 
 class RecommendRequest(BaseModel):
     origin:      str
@@ -1636,12 +1646,21 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
     active_reps      = get_active_reports(all_reports, city)
     incident_types   = ["accident", "flood", "road_closure", "heavy_traffic"]
 
-    # community_count = user-submitted Supabase reports + geo-verified third-party incidents
-    # (geo_verified=True, confidence >= GEO_CONFIDENCE_THRESHOLD from live_intelligence.py)
+    # Separate counts — never mix Supabase user submissions with third-party alerts.
+    #
+    # supabase_count    = user-submitted Supabase reports only (the original community)
+    # third_party_count = geo-relevance-verified TomTom/news/OSM incidents (third parties)
+    # total_alerts      = combined hazard load passed to safety/quality models
+    #
+    # The quality model and departure advice receive total_alerts so they can still
+    # react to verified third-party incident signals; the API response labels each
+    # count separately so clients can display the correct provenance.
     verified_live    = live_intel_data.get("community_incidents", [])
-    supabase_count   = len([r for r in active_reps if r.get("type") in incident_types])
-    third_party_count= len([r for r in verified_live if r.get("type") in incident_types])
-    community_count  = supabase_count + third_party_count
+    supabase_count   = len([r for r in active_reps    if r.get("type") in incident_types])
+    third_party_count= len([r for r in verified_live  if r.get("type") in incident_types])
+    total_alerts     = supabase_count + third_party_count
+    # community_count is kept as a local alias used by older helpers
+    community_count  = total_alerts
 
     # Road quality
     rq_result    = get_road_quality_score(city)
@@ -1761,7 +1780,12 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         departure_advice=departure_advice,
         ai_explanation=ai_explanation,
         distance_km=round(distance_km, 2),
-        community_reports=community_count,
+        # community_reports: Supabase user submissions only
+        community_reports=supabase_count,
+        # third_party_alerts: geo-relevance-verified TomTom/news/OSM incidents
+        third_party_alerts=third_party_count,
+        # total_incident_alerts: combined hazard load (used by quality/safety models)
+        total_incident_alerts=total_alerts,
         road_quality_score=round(rq_score, 1),
         road_quality_available=rq_available,
         road_quality_source=rq_source,
@@ -1773,7 +1797,7 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
         confidence=confidence,
         route_confidence=route_conf,
         staggered_departure=staggered if staggered["staggered"] else None,
-        active_reports=community_count,
+        active_reports=total_alerts,
         weather_trend=weather_trend,
         flood_risk=flood_risk if flood_risk["risk"] != "Low" else None,
         day_pattern=day_pattern,
@@ -1797,7 +1821,11 @@ async def predict_v2(req: PredictRequest, user_id: Optional[str] = None):
             # internal stack traces.  Clients can use this to show "live data may be
             # limited" notices when key providers are unavailable.
             "provider_health":          live_intel_data.get("provider_health", {}),
+            # all_providers_failed: True when incident count is zero AND at least one
+            # provider is known to be down — cannot distinguish healthy-zero from outage.
+            "all_providers_failed":     live_intel_data.get("all_providers_failed", False),
         },
+        training_data_date=MODEL_TRAINED,
         privacy_note="CommuteIQ stores only anonymized trip data. No personally identifiable travel history is collected or required.",
         ethical_note="CommuteIQ does not allow police checkpoint or individual tracking reports.",
     )

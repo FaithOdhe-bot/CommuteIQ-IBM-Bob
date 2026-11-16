@@ -152,7 +152,10 @@ CITY_TITLE_KEYWORDS: dict = {
     "eldoret":       ["eldoret", "uasin gishu", "eldoret city"],
     "enugu":         ["enugu", "enugu state", "enugu city"],
     "asaba":         ["asaba", "delta state", "asaba city"],
-    "benin city":    ["benin city", "benin", "edo state", "benin-ore"],
+    # NOTE: "benin" (bare) is intentionally excluded — it matches articles about
+    # Benin Republic (a country) and cannot be safely assigned to Benin City, Nigeria.
+    # Use "benin city" or "edo state" instead.
+    "benin city":    ["benin city", "edo state", "benin-ore"],
 }
 
 # Body-text keywords — used only to disambiguate when title gave a weak signal.
@@ -286,16 +289,28 @@ GEO_CONFIDENCE_THRESHOLD = 0.5
 
 # ── Deduplication ─────────────────────────────────────────────
 
+# Sentinel returned from _incident_fingerprint when deduplication cannot be
+# performed safely (no URL, no meaningful location string).  Any incident
+# that returns this value is preserved as-is — deduplication is skipped for it.
+_NO_DEDUP_SENTINEL = "__no_dedup__"
+
+
 def _incident_fingerprint(inc: dict) -> str:
     """Return a stable fingerprint for cross-source deduplication.
 
     Uses (in order of availability):
       1. Normalised source URL (strip query strings, lowercase)
-      2. Normalised headline (lowercase, strip punctuation, first 60 chars)
-      3. Fallback: type + city + published_at bucket (1-hour windows)
+      2. Normalised location string (lowercase, strip punctuation, first 60 chars)
+         combined with incident type, city, and 1-hour time bucket.
 
-    Two incidents are considered duplicates when their fingerprints match,
-    regardless of which source reported them first.
+    When neither a source URL nor a meaningful location string is present,
+    returns _NO_DEDUP_SENTINEL — the caller (deduplicate_incidents) treats
+    those items as non-deduplicable and always preserves them separately.
+
+    The last-resort type+city+hour bucket is intentionally removed: collapsing
+    all incidents of the same type in the same city-hour window would silently
+    merge distinct simultaneous events (e.g., two TomTom incidents on different
+    roads in the same city).
     """
     url = inc.get("source_url", "").strip()
     if url:
@@ -303,23 +318,25 @@ def _incident_fingerprint(inc: dict) -> str:
         url_norm = re.sub(r"[?#].*", "", url).lower().rstrip("/")
         return f"url:{url_norm}"
 
-    headline = inc.get("location", "") or inc.get("city", "")
-    if headline:
-        norm = re.sub(r"[^a-z0-9 ]", "", headline.lower())[:60].strip()
-        if norm:
-            # Bucket by 1-hour time windows so the same event reported at
-            # slightly different times doesn't become two entries.
-            ts = inc.get("published_at") or inc.get("created_at") or time.time()
-            bucket = int(ts // 3600)
-            itype  = inc.get("type", "unknown")
-            city   = inc.get("city", "unknown")
-            key    = f"headline:{itype}:{city}:{bucket}:{norm}"
-            return hashlib.md5(key.encode()).hexdigest()[:16]
+    # Only deduplicate by location when the location string contains more
+    # than just the city name alone (i.e., it carries route-specific information).
+    location = (inc.get("location") or "").strip()
+    city     = (inc.get("city") or "").strip().lower()
+    # Strip the city name from location before testing length, so "Lagos" alone
+    # is not mistaken for a meaningful location string.
+    loc_norm = re.sub(r"[^a-z0-9 ]", "", location.lower()).strip()
+    loc_sans_city = loc_norm.replace(city, "").strip()
 
-    # Last resort — just deduplicate by type+city+hour bucket
-    ts     = inc.get("published_at") or inc.get("created_at") or time.time()
-    bucket = int(ts // 3600)
-    return f"type:{inc.get('type','?')}:{inc.get('city','?')}:{bucket}"
+    if len(loc_sans_city) >= 8:
+        # Location carries enough specificity to deduplicate on
+        ts     = inc.get("published_at") or inc.get("created_at") or time.time()
+        bucket = int(ts // 3600)
+        itype  = inc.get("type", "unknown")
+        key    = f"headline:{itype}:{city}:{bucket}:{loc_norm[:60]}"
+        return hashlib.md5(key.encode()).hexdigest()[:16]
+
+    # Insufficient evidence — do not deduplicate
+    return _NO_DEDUP_SENTINEL
 
 
 def deduplicate_incidents(incidents: list) -> list:
@@ -329,12 +346,20 @@ def deduplicate_incidents(incidents: list) -> list:
     earlier published_at is kept and the duplicate's source is merged into the
     winner's 'corroborating_sources' list.  Distinct simultaneous incidents
     (same type, same city, different URLs / different time buckets) are preserved.
+
+    Incidents whose fingerprint is _NO_DEDUP_SENTINEL (no URL, no meaningful
+    location) are always preserved separately — merging them would silently
+    collapse genuinely distinct events.
     """
     seen:    dict = {}   # fingerprint → index in `result`
     result:  list = []
 
     for inc in incidents:
         fp = _incident_fingerprint(inc)
+        if fp == _NO_DEDUP_SENTINEL:
+            # No reliable fingerprint — preserve as-is, never merge
+            result.append(dict(inc))
+            continue
         if fp in seen:
             # Merge: add this source to the winning item's corroborating list
             winner = result[seen[fp]]
@@ -496,18 +521,23 @@ async def get_live_incidents(city: str) -> list:
                     pass
 
             incidents.append({
-                "type":         itype,
-                "location":     location,
-                "city":         city,
-                "source":       "tomtom_incidents",
-                # TomTom incidents are geographically verified (bbox-bounded)
-                "confidence":   0.9,
-                "geo_verified": True,
-                "published_at": published_at,
-                "retrieved_at": now,
-                "severity":     delay,
-                "created_at":   now,
-                "expires_at":   now + MAX_ARTICLE_AGE_S.get(itype, MAX_ARTICLE_AGE_S["_default"]),
+                "type":               itype,
+                "location":           location,
+                "city":               city,
+                "source":             "tomtom_incidents",
+                "source_category":    "third_party_traffic",
+                "confidence":         0.9,
+                # geo_relevance_verified: incident is relevant to the requested city
+                # (confirmed by TomTom bounding box — not just keyword matching)
+                "geo_relevance_verified": True,
+                # location_confirmed: incident has a measured coordinate or bounded
+                # geographic range, not just a keyword-matched city assignment
+                "location_confirmed": True,
+                "published_at":       published_at,
+                "retrieved_at":       now,
+                "severity":           delay,
+                "created_at":         now,
+                "expires_at":         now + MAX_ARTICLE_AGE_S.get(itype, MAX_ARTICLE_AGE_S["_default"]),
             })
 
         _record_provider_ok(provider)
@@ -671,12 +701,18 @@ async def get_news_incidents(cities: list = None) -> list:
             "location":     location or incident_city,
             "city":         incident_city,
             "source":       "news_scan",
+            "source_category": "third_party_news",
             "source_url":   item["link"],
-            # confidence reflects geographic verification quality:
-            # 0.65 = title keyword match (reliable)
+            # confidence reflects geographic relevance quality:
+            # 0.65 = title keyword match (article title names the city)
             # 0.4  = body-only match (unverified — excluded from alert counts)
             "confidence":   geo_confidence,
-            "geo_verified": geo_confidence >= GEO_CONFIDENCE_THRESHOLD,
+            # geo_relevance_verified: the article title names this city — it is
+            # likely about this city.  NOT the same as a confirmed incident location.
+            "geo_relevance_verified": geo_confidence >= GEO_CONFIDENCE_THRESHOLD,
+            # location_confirmed is always False for news items — we have no
+            # coordinate or bounding-box verification of where the incident occurred.
+            "location_confirmed": False,
             # published_at is the ORIGINAL article publication time — never reset
             "published_at": published_at,
             "retrieved_at": now,
@@ -753,18 +789,23 @@ async def search_news_for_route(origin: str, destination: str, city: str) -> lis
                         if not _article_is_fresh(published_at, itype):
                             break
                         incidents.append({
-                            "type":         itype,
-                            "location":     f"{origin}–{destination} corridor",
-                            "city":         city,
-                            "source":       "google_news",
-                            "source_url":   item.findtext("link", ""),
-                            "confidence":   0.55,
-                            "geo_verified": False,   # route-corridor heuristic only
-                            "published_at": published_at,
-                            "retrieved_at": now,
-                            "created_at":   now,
-                            "expires_at":   now + MAX_ARTICLE_AGE_S.get(itype,
-                                                MAX_ARTICLE_AGE_S["_default"]),
+                            "type":               itype,
+                            "location":           f"{origin}–{destination} corridor",
+                            "city":               city,
+                            "source":             "google_news",
+                            "source_category":    "third_party_news",
+                            "source_url":         item.findtext("link", ""),
+                            "confidence":         0.55,
+                            # geo_relevance_verified: route-corridor query matched a
+                            # specific origin/destination — better than city keyword only
+                            # but still not a confirmed incident coordinate.
+                            "geo_relevance_verified": True,
+                            "location_confirmed": False,  # no coordinate evidence
+                            "published_at":       published_at,
+                            "retrieved_at":       now,
+                            "created_at":         now,
+                            "expires_at":         now + MAX_ARTICLE_AGE_S.get(itype,
+                                                      MAX_ARTICLE_AGE_S["_default"]),
                         })
                         break
             _record_provider_ok(provider)
@@ -846,16 +887,20 @@ async def get_osm_road_closures(city: str) -> list:
                         exp_ts = now + 86_400
 
                     incidents.append({
-                        "type":         "road_closure",
-                        "location":     name[:100],
-                        "city":         city,
-                        "source":       "osm_closures",
-                        "confidence":   0.75,   # community-verified, higher than news
-                        "geo_verified": True,
-                        "published_at": now,    # OSM closures API does not provide pubDate
-                        "retrieved_at": now,
-                        "created_at":   now,
-                        "expires_at":   exp_ts,
+                        "type":               "road_closure",
+                        "location":           name[:100],
+                        "city":               city,
+                        "source":             "osm_closures",
+                        "source_category":    "third_party_osm",
+                        "confidence":         0.75,
+                        "geo_relevance_verified": True,
+                        # OSM closures are bbox-bounded — location is confirmed
+                        # within the city bounding box even without a point coordinate.
+                        "location_confirmed": True,
+                        "published_at":       now,    # OSM closures API has no pubDate
+                        "retrieved_at":       now,
+                        "created_at":         now,
+                        "expires_at":         exp_ts,
                     })
                 _record_provider_ok(provider)
             else:
@@ -897,15 +942,17 @@ out tags 10;
                                 tags.get("description") or
                                 f"{city} road works")
                         incidents.append({
-                            "type":         "construction",
-                            "location":     name[:100],
-                            "city":         city,
-                            "source":       "osm_overpass",
-                            "confidence":   0.65,
-                            "geo_verified": True,
-                            "published_at": now,    # no pubDate from Overpass
-                            "retrieved_at": now,
-                            "created_at":   now,
+                            "type":               "construction",
+                            "location":           name[:100],
+                            "city":               city,
+                            "source":             "osm_overpass",
+                            "source_category":    "third_party_osm",
+                            "confidence":         0.65,
+                            "geo_relevance_verified": True,
+                            "location_confirmed": True,  # Overpass elements are coordinate-bound
+                            "published_at":       now,
+                            "retrieved_at":       now,
+                            "created_at":         now,
                             "expires_at":   now + 86_400,  # 24h
                         })
                     _record_provider_ok(overpass_provider)
@@ -1024,17 +1071,37 @@ async def get_route_intelligence(
     # Cross-source deduplication
     deduped = deduplicate_incidents(fresh_incidents)
 
-    # Separate geo-verified incidents (suitable for safety alert counts) from
-    # low-confidence / unverified items (returned for transparency only).
-    community_incidents = [
+    # Separate geo-relevance-verified third-party incidents from low-confidence /
+    # unverified items (returned for transparency only).
+    # Note: "geo_relevance_verified" means the article/data is likely about the
+    # requested city.  It does NOT mean the incident location has been confirmed
+    # with a coordinate — see "location_confirmed" on each incident for that.
+    # These are third-party alerts, NOT community (Supabase) submissions.
+    third_party_alerts = [
         i for i in deduped
-        if i.get("geo_verified", False)
+        if i.get("geo_relevance_verified", False)
         and i.get("confidence", 0) >= GEO_CONFIDENCE_THRESHOLD
     ]
 
+    # Detect provider outage: if all incident sources returned empty AND at least
+    # one provider recorded an error (not just "never_fetched"), we cannot
+    # distinguish "healthy, no incidents" from "all providers down".
+    incident_providers = [
+        "tomtom_incidents", f"osm_closures:{city}",
+        f"osm_overpass:{city}", f"google_news_route:{city}",
+    ]
+    # A provider "failed" if it has available=False (recorded an error this session).
+    # "never_fetched" (available=None) means TomTom key not set — not an outage.
+    any_provider_failed = any(
+        get_provider_health(p).get("available") is False
+        for p in incident_providers
+    )
+    # all_providers_failed: no incidents AND at least one provider known to be down
+    all_providers_failed = (len(deduped) == 0 and any_provider_failed)
+
     # Confidence boost: live data is more trustworthy than guesses
     confidence_boost = 15 if congestion_result.get("live") else 0
-    confidence_boost += min(len(community_incidents) * 5, 20)
+    confidence_boost += min(len(third_party_alerts) * 5, 20)
 
     # Congestion method/note: propagate from congestion_result or construct
     cong_method = "tomtom_live" if congestion_result.get("live") else "time_of_day_heuristic"
@@ -1062,9 +1129,12 @@ async def get_route_intelligence(
         "congestion_method":        cong_method,
         "congestion_note":          cong_note,
         "incidents":                deduped,
-        "community_incidents":      community_incidents,
+        # third_party_alerts: geo-relevance-verified third-party incidents.
+        # Callers must NOT add these directly to Supabase community_reports counts.
+        "community_incidents":      third_party_alerts,
         "incident_count":           len(deduped),
-        "community_incident_count": len(community_incidents),
+        "community_incident_count": len(third_party_alerts),
+        "all_providers_failed":     all_providers_failed,
         "confidence_boost":         confidence_boost,
         "data_sources":             list(set(
             [congestion_result.get("source", "time_estimate")] +
