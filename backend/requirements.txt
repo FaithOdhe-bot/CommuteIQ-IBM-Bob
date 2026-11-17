@@ -4,8 +4,13 @@ httpx==0.27.2
 pydantic==2.9.2
 supabase==2.7.4
 python-dotenv==1.0.1
-scikit-learn==1.5.0
-xgboost==2.0.3
+# NOTE: scikit-learn 1.5.0 was the original pin but pkl artifacts contain
+# version stamp 1.8.0, confirming they were serialised with sklearn 1.8.0.
+# This pin documents the confirmed training version. Current env: 1.9.1.
+scikit-learn==1.8.0
+# NOTE: XGBoost pkl save_config confirms version 3.4.1 (matches current env).
+# The original pin of 2.0.3 was incorrect. Current env: 3.4.1.
+xgboost==3.4.1
 joblib==1.4.2
 pandas==2.2.2
 numpy==1.26.4

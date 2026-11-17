@@ -1,0 +1,110 @@
+{
+  "_note": "Current-environment reference predictions. NOT verified against original training outputs. Recorded with sklearn 1.9.1 and XGBoost 3.4.1.",
+  "recorded_with": {
+    "sklearn": "1.9.1",
+    "xgboost": "3.4.1",
+    "artifact_sklearn_version": "1.8.0",
+    "artifact_xgboost_version": "3.4.1"
+  },
+  "feature_schema": [
+    "distance_km",
+    "congestion_enc",
+    "weather_enc",
+    "alternatives",
+    "is_peak",
+    "mode_enc",
+    "city_enc",
+    "road_quality"
+  ],
+  "encoders": {
+    "congestion_map": {
+      "Low": 0,
+      "Medium": 1,
+      "High": 2
+    },
+    "weather_map": {
+      "Clear": 0,
+      "Cloudy": 1,
+      "Foggy": 2,
+      "Rainy": 3
+    },
+    "mode_map": {
+      "driving": 0,
+      "danfo": 1,
+      "brt": 2,
+      "okada": 3,
+      "keke": 4,
+      "rideshare": 5,
+      "walking": 6,
+      "matatu": 7,
+      "bus": 8,
+      "boda_boda": 9,
+      "tuk_tuk": 10,
+      "taxi": 11,
+      "boda": 9
+    },
+    "city_map": {
+      "nigeria": 0,
+      "nairobi": 1
+    },
+    "quality_labels": {
+      "0": "Poor",
+      "1": "Moderate",
+      "2": "Good"
+    }
+  },
+  "travel_time_reference": {
+    "lagos_driving_low_clear": 71.889824,
+    "lagos_driving_high_rainy": 184.896255,
+    "nairobi_matatu_medium_clear": 183.785156,
+    "nairobi_boda_boda_low_foggy": 177.884003,
+    "lagos_okada_high_clear": 353.239014
+  },
+  "quality_reference": {
+    "lagos_driving_low_clear_good": {
+      "class_int": 2,
+      "class_label": "Good",
+      "proba": [
+        0.370283,
+        0.065488,
+        0.564229
+      ]
+    },
+    "lagos_driving_high_rainy_poor": {
+      "class_int": 0,
+      "class_label": "Poor",
+      "proba": [
+        0.705005,
+        0.132464,
+        0.16253
+      ]
+    },
+    "nairobi_matatu_medium_clear": {
+      "class_int": 1,
+      "class_label": "Moderate",
+      "proba": [
+        0.159666,
+        0.739432,
+        0.100901
+      ]
+    },
+    "nairobi_boda_medium_rainy": {
+      "class_int": 0,
+      "class_label": "Poor",
+      "proba": [
+        0.601879,
+        0.317983,
+        0.080138
+      ]
+    },
+    "lagos_brt_low_cloudy": {
+      "class_int": 1,
+      "class_label": "Moderate",
+      "proba": [
+        0.270146,
+        0.41682,
+        0.313034
+      ]
+    }
+  }
+}

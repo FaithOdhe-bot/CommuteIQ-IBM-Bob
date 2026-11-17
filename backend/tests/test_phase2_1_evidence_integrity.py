@@ -449,7 +449,7 @@ class TestProviderHealth:
 @pytest.fixture(scope="module")
 def api_client():
     from fastapi.testclient import TestClient
-    from main import app
+    from app.main import app  # unified import path: prevents duplicate load_models() call
     return TestClient(app)
 
 
